@@ -480,9 +480,11 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
  * catalog spelling (providerId\modelId) only; bare or foreign values return
  * undefined (Scope 5 review F3: advertisement and materialization must
  * resolve the pin identically, or T3's assert-when-equal logic misfires).
- * `candidates` lets an already-loaded model list be reused (the pending
- * branch loads the same list for its leading entry — one full config read
- * per build, not two).
+ * `candidates` lets an already-loaded model list be reused — the pending
+ * branch passes the list it loaded for its leading entry, so the pin check
+ * adds no config read of its own (the build itself still reads the config
+ * for the leading entry and the model table; the pin check was a THIRD
+ * read before).
  */
 export function resolvePinnedModel(
   candidates: ModelRef[] = loadAllModels(),

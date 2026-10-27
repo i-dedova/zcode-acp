@@ -123,6 +123,14 @@ const SID = "sess_test";
 const CHUNK = "chunk-1";
 
 describe("dispatchEvent", () => {
+  afterEach(() => {
+    // The hoisted stand-ins persist across tests; a leaked last-choice or
+    // catalog seed would silently flip the pending branch's precedence in
+    // the next test (spark review: N1).
+    lc.setLast(undefined);
+    cc.set(undefined);
+  });
+
   it("ToolCallNew emits tool_call with claudeCode toolName _meta", async () => {
     const { cx, sent } = mockContext();
     const server = makeServer(false);
