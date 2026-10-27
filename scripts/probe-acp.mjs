@@ -121,6 +121,15 @@ try {
       value: { type: "id", value: "low" },
     });
     emit("set-v2-envelope", setV2.result ?? setV2.error);
+    // The backend-registry test: switching onto the start-plan plan
+    // (config: enabled:false + systemDisabledReason + stored key; the bridge
+    // now pushes it entitled and serves its stored key).
+    const setStart = await request("session/set_config_option", {
+      sessionId: sid,
+      configId: "model",
+      value: "builtin:zai-start-plan\\GLM-5.3-Flash",
+    });
+    emit("set-model-startplan", setStart.result ?? setStart.error);
   }
 
   const providers = await request("providers/list", {}, 10000);

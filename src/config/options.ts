@@ -34,6 +34,7 @@ import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from 
 import {
   accountProviderIdFor,
   builtinTableModelIds,
+  builtinTableProviderName,
   configProviderIdFor,
   isEntitledBuiltinProvider,
 } from "./account-provider.js";
@@ -293,7 +294,12 @@ export function loadAllModels(): ModelRef[] {
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
       if (pinned && pid !== pinned) continue;
       if (!providerSelectable(pid, p)) continue;
-      const providerName = p.name ?? pid;
+      // Builtin plans: the desktop writes the SAME generic name into every
+      // plan entry ("Z.ai - Coding Plan" on both zai plans) — the bundled
+      // table's own name is the distinguishing label ("Start Plan" vs
+      // "Z.AI Individual Coding Plan").
+      const providerName =
+        isBuiltinProvider(pid) ? (builtinTableProviderName(pid) ?? p.name ?? pid) : (p.name ?? pid);
       // Custom providers: once the personal config tracks the provider's
       // models, THAT list is authoritative. Additions AND deletions land only
       // there (config.json stopped syncing), and the backend registry knows no
@@ -302,11 +308,16 @@ export function loadAllModels(): ModelRef[] {
       // providers keep the union: their catalog comes from the account
       // snapshot, and a personal rule is an override, not a complete list.
       const personalIds = personal?.modelsByProvider.get(pid);
-      const localIds = [...Object.keys(p.models ?? {}), ...(personalIds ?? [])];
+      const localIds = Object.keys(p.models ?? {});
       let ids: Set<string>;
-      if (personalIds !== undefined && !isBuiltinProvider(pid)) {
+      if (!isBuiltinProvider(pid) && personalIds !== undefined) {
         ids = new Set(personalIds);
       } else if (localIds.length > 0) {
+        // Builtin plans: config.json's models map is the DESKTOP's own current
+        // per-plan list. Personal provider_config rules carry stale/historical
+        // additions (observed 2026-10-27: GLM-5.3 listed under start-plan
+        // while the desktop allocates only GLM-5.3-Flash) — never unioned
+        // into a plan's catalog.
         ids = new Set(localIds);
       } else {
         // i31: plan providers keep their catalog in the bundled table, not in
@@ -599,7 +610,15 @@ export async function buildConfigOptions(
     // lands, and T3 overlays its own remembered selection on top of it
     // (observed 2026-10-27: composer displayed GLM-5.3-Flash over a
     // Qwen-vocabulary effort list). Foreign/deleted choices fall back to the
-    // leading entry.
+    // leading entry. DESIGN CEILING: T3's session/new carries no model
+    // (payload is cwd/mcpServers/directories only — AcpSessionRuntime.ts) and
+    // its composer renders its OWN remembered selection without consulting
+    // the agent, so a pre-open composer can show a vocabulary for a model the
+    // catalog is not advertising; the first set_config_option/prompt corrects
+    // it (T3 applies the rebuilt options — its mode·thought chips track
+    // switches). ponytail: ceiling: per-AcpSid vocabulary unknown until the
+    // client speaks; upgrade when: ACP lets config option values carry
+    // per-model metadata or clients echo their selection at session/new.
     const last = readGlobalModelChoice();
     if (last?.model) {
       const parsed = parseModelValue(last.model);
@@ -726,7 +745,30 @@ export async function buildConfigOptions(
           currentProviderId !== "" &&
           configProviderIdFor(m.providerId) === configProviderIdFor(currentProviderId),
       ) ?? availList.find((m) => m.modelId === currentModelId);
-    if (availEntry?.levels && availEntry.levels.length > 0) {
+    // A SINGLE-entry snapshot list is the backend echoing the current default,
+    // not a vocabulary (observed 2026-10-27: the create-time snapshot for
+    // GLM-5.3-Flash carried levels=[max]; the settled list after
+    // requestRuntimePreferences carried low/high/max). Trusting it would
+    // shrink the picker to one item — a short list only overrides when the
+    // config declares nothing.
+    const declaredFallback = availEntry && (availEntry.levels?.length ?? 0) < 2
+      ? configReasoningVariants(
+          currentProviderId || configProviderIdFor(availEntry.providerId ?? ""),
+          currentModelId,
+        )
+      : null;
+    if (declaredFallback && declaredFallback.variants.length > 0) {
+      thoughtOptions = orderThoughtVariants(declaredFallback.variants);
+      if (!declaredFallback.variants.includes(currentThought)) {
+        currentThought =
+          declaredFallback.defaultVariant && declaredFallback.variants.includes(declaredFallback.defaultVariant)
+            ? declaredFallback.defaultVariant
+            : (declaredFallback.variants[0] ?? currentThought);
+      }
+      log(
+        `catalog: thought levels from config (single-level snapshot for ${currentModelId} ignored)`,
+      );
+    } else if (availEntry?.levels && availEntry.levels.length > 0) {
       thoughtOptions = orderThoughtVariants(availEntry.levels);
       if (!availEntry.levels.includes(currentThought)) {
         currentThought =

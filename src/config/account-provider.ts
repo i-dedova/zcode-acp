@@ -314,6 +314,21 @@ export function builtinTableModelIds(providerId: string): string[] {
 }
 
 /**
+ * The display name the bundled table declares for a builtin provider. The
+ * desktop writes the SAME generic name into every plan entry it syncs to
+ * config.json (observed 2026-10-27: "Z.ai - Coding Plan" on both the
+ * individual and the start-plan entry), so plan pickers are
+ * indistinguishable without the table's own name ("Z.AI Individual Coding
+ * Plan" vs "Start Plan").
+ */
+export function builtinTableProviderName(providerId: string): string | null {
+  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+    (r) => r.providerId === accountProviderIdFor(providerId),
+  );
+  return rule?.providerName ?? null;
+}
+
+/**
  * The request auth the bridge can serve for an `account:*` coding-plan model,
  * or null when it cannot answer.
  *
@@ -338,12 +353,15 @@ export function codingPlanRequestAuthFor(
   const individual =
     rule?.config?.access?.mode === "individual-coding-plan" ||
     (!rule && accountProviderId.endsWith("-individual-coding-plan"));
-  if (!individual) return null;
   const legacyId = configProviderIdFor(accountProviderId);
   if (legacyId === accountProviderId) return null;
-  if (!entitledBuiltinProviders().has(legacyId)) return null;
-  // config.json first (the pre-3.12 builtin: provider's own spelling); a fresh
-  // desktop-only layout has none — fall through to the stored plan key.
+  // config.json first — for ANY plan the desktop provisioned a key for.
+  // 2026-10-27 operator ruling: start-plan ships enabled:false + a stored key
+  // while the desktop shows it active with quota; a desktop-written key is
+  // the same file-evidenced credential class the individual path serves.
+  // (The #123 refusal covers the credential-STORE path below, where a
+  // start-plan entry can exist without entitlement behind an Aliyun
+  // captcha — with no config key there is nothing to serve either way.)
   try {
     const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
       provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
@@ -351,7 +369,13 @@ export function codingPlanRequestAuthFor(
     const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
     if (apiKey) return { apiKey };
   } catch {
-    // unreadable/absent config — the store decides
+    // unreadable config — the store decides
+  }
+  if (!individual) {
+    return null;
+  }
+  if (!entitledBuiltinProviders().has(legacyId)) {
+    return null;
   }
   const stored = storeIndividualCodingPlanKey(accountProviderId);
   return stored ? { apiKey: stored } : null;
@@ -391,7 +415,23 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
   const providers: AccountProviderPayload["providers"] = {};
   const states: AccountProviderPayload["states"] = {};
   for (const rule of rules) {
-    const entitled = enabled.has(configProviderIdFor(rule.providerId));
+    const legacyId = configProviderIdFor(rule.providerId);
+    // 2026-10-27: the desktop's coding-plan-cache verdict goes STALE when a
+    // plan activates later (start-plan: cache "unavailable" while the desktop
+    // shows it active with quota). A desktop-provisioned config key is the
+    // fresher file evidence — treat the plan as entitled for the registry
+    // push. ponytail: ceiling: file heuristics; upgrade when: the desktop
+    // exposes a machine-readable entitlement snapshot to mirror instead.
+    let configKey: string | undefined;
+    try {
+      const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
+        provider?: Record<string, { options?: { apiKey?: string } }>;
+      };
+      configKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
+    } catch {
+      // unreadable config — the cache verdict stands
+    }
+    const entitled = enabled.has(legacyId) || Boolean(configKey);
     providers[rule.providerId] = {
       builtinModelIds: rule.config?.builtinModelIds,
       access: { type: "zhipu-account", entitled },
