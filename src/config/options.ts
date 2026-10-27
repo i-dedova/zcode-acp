@@ -588,6 +588,42 @@ export async function buildConfigOptions(
           const def = typeof tlSet.defaultLevel === "string" ? tlSet.defaultLevel : undefined;
           currentThought = def && values.has(def) ? def : (tlAvail[0]?.value ?? currentThought);
         }
+        // The backend advertises the builtin catalog's GENERIC vocabulary for
+        // builtin:<family>-<plan> models (low/medium/high/xhigh/max — observed
+        // 2026-10-27 on a 0.17.0 backend for GLM-5.3-Flash), while the model's
+        // real level set is declared per model in config.json
+        // (provider.<id>.models.<modelId>.reasoning.variants — GLM-5.3-Flash:
+        // low/max/high). Narrow the advertised list to that declaration,
+        // intersected with what the backend offers so a stale config entry can
+        // never advertise a level setModel would reject. Keep the backend list
+        // untouched when the config declares nothing for this model.
+        try {
+          const cfg = readConfig() as ConfigShape;
+          const pidKey =
+            cfg.provider?.[currentProviderId] !== undefined
+              ? currentProviderId
+              : currentProviderId.replace(/^builtin:/, "");
+          const m = (
+            cfg.provider?.[pidKey]?.models as
+              | Record<
+                  string,
+                  { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
+                >
+              | undefined
+          )?.[currentModelId];
+          const variants = m?.reasoning?.variants;
+          if (m?.reasoning?.enabled !== false && variants && variants.length > 0) {
+            const narrowed = orderThoughtVariants(variants.filter((v) => values.has(v)));
+            if (narrowed.length > 0) {
+              thoughtOptions = narrowed;
+              if (!narrowed.some((o) => o.value === currentThought)) {
+                currentThought = narrowed[0]?.value ?? currentThought;
+              }
+            }
+          }
+        } catch {
+          // unreadable config — the backend list stands
+        }
       }
     } catch {
       // keep defaults
