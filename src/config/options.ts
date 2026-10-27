@@ -597,12 +597,26 @@ export async function buildConfigOptions(
         // intersected with what the backend offers so a stale config entry can
         // never advertise a level setModel would reject. Keep the backend list
         // untouched when the config declares nothing for this model.
+        // A lazy/composer session's session/read carries no model.current —
+        // fall back to the enabled provider's leading model (the same model
+        // the pending-session branch advertises), whose variants drive the
+        // composer dropdown until a real model switch lands.
         try {
           const cfg = readConfig() as ConfigShape;
+          const srModelKnown = Boolean(cur.providerId && cur.modelId);
+          let srcProvider = currentProviderId;
+          let srcModel = currentModelId;
+          if (!srModelKnown) {
+            const first = loadAllModels()[0];
+            if (first) {
+              srcProvider = first.providerId;
+              srcModel = first.modelId;
+            }
+          }
           const pidKey =
-            cfg.provider?.[currentProviderId] !== undefined
-              ? currentProviderId
-              : currentProviderId.replace(/^builtin:/, "");
+            cfg.provider?.[srcProvider] !== undefined
+              ? srcProvider
+              : srcProvider.replace(/^builtin:/, "");
           const m = (
             cfg.provider?.[pidKey]?.models as
               | Record<
@@ -610,7 +624,7 @@ export async function buildConfigOptions(
                   { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
                 >
               | undefined
-          )?.[currentModelId];
+          )?.[srcModel];
           const variants = m?.reasoning?.variants;
           if (m?.reasoning?.enabled !== false && variants && variants.length > 0) {
             const narrowed = orderThoughtVariants(variants.filter((v) => values.has(v)));

@@ -149,4 +149,50 @@ describe("thought-level narrowing (i31 fork patch)", () => {
     const thought = await thoughtOption(makeServer(h.MODEL, undefined as never, "high"));
     expect(thought?.options.map((o) => o.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
+
+  it("narrows a lazy/composer session whose session/read carries no model.current", async () => {
+    // New-thread composers hit the live path via a lazy session whose
+    // session/read has no model.current — the narrowing must fall back to the
+    // enabled provider's leading model (the one the pending branch advertises)
+    // instead of leaving the generic list standing.
+    const server = new ZcodeAcpServer();
+    server.registerSession("sess_acp", "sess_zcode");
+    class LazyBackend {
+      isDead = false;
+      async request(
+        id: number,
+        method: string,
+      ): Promise<{ id: number; result?: unknown; error?: unknown }> {
+        if (method === "session/read") {
+          return {
+            id,
+            result: {
+              projection: { status: "idle" },
+              settings: {
+                mode: { current: "build" },
+                thoughtLevel: {
+                  current: "medium",
+                  available: [
+                    { value: "low", label: "low" },
+                    { value: "medium", label: "medium" },
+                    { value: "high", label: "high" },
+                    { value: "xhigh", label: "xhigh" },
+                    { value: "max", label: "max" },
+                  ],
+                },
+              },
+            },
+          };
+        }
+        return { id, result: {} };
+      }
+    }
+    server.backend = new LazyBackend() as unknown as ZcodeAcpServer["backend"];
+    await setConfig({
+      [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+    });
+    const thought = await thoughtOption(server);
+    expect(thought?.options.map((o) => o.value)).toEqual(["low", "high", "max"]);
+    expect(thought?.currentValue).toBe("max");
+  });
 });
