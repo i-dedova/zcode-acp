@@ -617,7 +617,14 @@ export async function buildConfigOptions(
             if (narrowed.length > 0) {
               thoughtOptions = narrowed;
               if (!narrowed.some((o) => o.value === currentThought)) {
-                currentThought = narrowed[0]?.value ?? currentThought;
+                // Prefer the operator-declared default (config.json's
+                // reasoning.defaultVariant) over canonical order — the
+                // pending-session branch (above) uses the same preference.
+                const def = m?.reasoning?.defaultVariant;
+                currentThought =
+                  def && narrowed.some((o) => o.value === def)
+                    ? def
+                    : (narrowed[0]?.value ?? currentThought);
               }
             }
           }
