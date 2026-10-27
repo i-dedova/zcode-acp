@@ -53,6 +53,12 @@ function candidateNodeBinaries(): string[] {
   const cands: string[] = [];
   const envNode = process.env.ZCODE_NODE;
   if (envNode) cands.push(envNode);
+  // The bridge's own runtime: when the bridge boots on node >= 22.5 it is
+  // sqlite-capable by construction. On Windows `which node` can return an
+  // MSYS POSIX path that existsSync cannot resolve, so without this the
+  // whole chain can miss and the spawn falls back to the bare zcode.cjs
+  // shebang, which Windows cannot exec (EFTYPE, observed 2026-10-27).
+  cands.push(process.execPath);
   cands.push("/opt/homebrew/bin/node", "/usr/local/bin/node");
   const whichNode = whichSync("node");
   if (whichNode) cands.push(whichNode);
@@ -92,7 +98,15 @@ function bundledZcodeCandidates(): string[] {
   const home = os.homedir();
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
-    return [path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs")];
+    // NSIS per-user install (LOCALAPPDATA\Programs) AND per-machine install
+    // (Program Files) — the desktop installer offers both (this machine:
+    // Program Files, observed 2026-10-27 when only the per-user path was
+    // probed and discovery missed the CLI entirely).
+    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+    return [
+      path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs"),
+      path.join(programFiles, "ZCode", "resources", "glm", "zcode.cjs"),
+    ];
   }
   return [
     "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
