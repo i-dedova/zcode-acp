@@ -2580,7 +2580,10 @@ export async function setConfigOptionHandler(
   server: ZcodeAcpServer,
   // The union lets the wire-accurate parser in index.ts pass its params
   // without a type assertion: the custom schema accepts both protocols'
-  // value spellings, the acp type only describes the v1 ones.
+  // value spellings, the acp type only describes the v1 ones. cx MUST be the
+  // REQUESTING connection (ctx.client, not the broadcast proxy — review
+  // round 2): the response shape and emitConfigOptionUpdate's initiator leg
+  // key on this connection's negotiated protocol.
   params:
     | acp.SetSessionConfigOptionRequest
     | { sessionId: string; configId: string; value: ConfigOptionWireValue },

@@ -276,7 +276,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
             ]),
           })
           .passthrough(),
-        (ctx) => setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
+        (ctx) => setConfigOptionHandler(server, ctx.params, ctx.client),
       )
       // ZCode-specific extensions (non-standard ACP methods). Use a passthrough
       // zod parser so all param fields survive into the handler.
