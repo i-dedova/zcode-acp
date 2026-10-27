@@ -86,11 +86,22 @@ function builtinTablePath(): string | null {
   return existsSync(bundled) ? bundled : null;
 }
 
+// ponytail: ceiling: 5s TTL table/entitlement caches — buildConfigOptions
+// runs on every update and these helpers re-read + re-parse files per
+// provider; upgrade when: a flow needs sub-5s reflection of file edits.
+const TABLE_CACHE_MS = 5000;
+let tableCache: { at: number; found: { table: BuiltinTable; file: string } | null } | null = null;
+
 function readBuiltinTable(): { table: BuiltinTable; file: string } | null {
+  if (tableCache && Date.now() - tableCache.at < TABLE_CACHE_MS) {
+    return tableCache.found;
+  }
   const file = builtinTablePath();
   if (!file) return null;
   try {
-    return { table: JSON.parse(readFileSync(file, "utf8")) as BuiltinTable, file };
+    const found = { table: JSON.parse(readFileSync(file, "utf8")) as BuiltinTable, file };
+    tableCache = { at: Date.now(), found };
+    return found;
   } catch (e) {
     warn(
       `account-provider: unreadable provider table (${e instanceof Error ? e.message : String(e)})`,
@@ -213,7 +224,12 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  * zai/start/team plan false); source 3 restores the same outcome on fresh
  * desktop-only layouts (verified 2026-10 against a real store).
  */
+let entitledCache: { at: number; set: Set<string> } | null = null;
+
 function entitledBuiltinProviders(): Set<string> {
+  if (entitledCache && Date.now() - entitledCache.at < TABLE_CACHE_MS) {
+    return entitledCache.set;
+  }
   const out = new Set<string>();
   const credsDir = path.dirname(ZCODE_CREDS_PATH);
   let sawVerdict = false;
@@ -278,6 +294,7 @@ function entitledBuiltinProviders(): Set<string> {
   } catch {
     // setting.json absent (headless-only) — nothing to infer
   }
+  entitledCache = { at: Date.now(), set: out };
   return out;
 }
 
@@ -339,9 +356,13 @@ export function builtinTableProviderName(providerId: string): string | null {
  * with the plan's API key; the bridge serves the same plan's key from legacy
  * config.json when written, and otherwise from the encrypted credential store
  * — a fresh desktop-only install writes no config.json, its plan key lives
- * only there (#320). Only the individual coding plan is served: start-plan
- * needs an Aliyun captcha (stays refused, issue #123), and team keys are not
- * entitlement evidence (see storeIndividualCodingPlanKey).
+ * only there (#320). Served modes are the individual coding plan and the
+ * start plan (2026-10-27: the desktop provisions a start-plan key into
+ * config.json and shows the plan active; a desktop-written key is the same
+ * evidence class). Team requests are never served — they need org headers
+ * the bridge cannot source, and team keys are not entitlement evidence (see
+ * storeIndividualCodingPlanKey). The credential STORE stays individual-only:
+ * a start-plan store entry can over-claim behind the Aliyun captcha (#123).
  */
 export function codingPlanRequestAuthFor(
   accountProviderId: string | undefined,
@@ -350,9 +371,21 @@ export function codingPlanRequestAuthFor(
   const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
     (r) => r.providerId === accountProviderId,
   );
-  const individual =
-    rule?.config?.access?.mode === "individual-coding-plan" ||
-    (!rule && accountProviderId.endsWith("-individual-coding-plan"));
+  // Mode allowlist (review round 1): team is never served. Table-absent
+  // layouts derive the mode from the id suffix — the same fallback
+  // configProviderIdFor uses.
+  const mode =
+    rule?.config?.access?.mode ??
+    (accountProviderId.endsWith("-start-plan")
+      ? "start-plan"
+      : accountProviderId.endsWith("-team-coding-plan")
+        ? "team-coding-plan"
+        : accountProviderId.endsWith("-coding-plan")
+          ? "individual-coding-plan"
+          : undefined);
+  if (mode !== "individual-coding-plan" && mode !== "start-plan") {
+    return null;
+  }
   const legacyId = configProviderIdFor(accountProviderId);
   if (legacyId === accountProviderId) return null;
   // config.json first — for ANY plan the desktop provisioned a key for.
@@ -371,7 +404,7 @@ export function codingPlanRequestAuthFor(
   } catch {
     // unreadable config — the store decides
   }
-  if (!individual) {
+  if (mode !== "individual-coding-plan") {
     return null;
   }
   if (!entitledBuiltinProviders().has(legacyId)) {
@@ -439,7 +472,9 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
     states[rule.providerId] = {
       availability: entitled ? "available" : "unavailable",
       entitled,
-      current: entitled,
+      // `current` marks the verdict-bearing plan only — a key-provisioned
+      // plan is switched-to, not the default (review round 1).
+      current: enabled.has(legacyId),
     };
   }
   return {

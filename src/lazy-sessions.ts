@@ -279,12 +279,23 @@ export function readGlobalModelChoice():
   | undefined {
   try {
     const v = JSON.parse(readFileSync(lastChoicePath(), "utf8")) as {
-      model?: string;
-      thought?: string;
-      at?: number;
+      model?: unknown;
+      thought?: unknown;
+      at?: unknown;
     };
-    if (typeof v === "object" && v !== null) {
-      return v;
+    // Hand-edited or corrupt files must fall back to the leading model, not
+    // throw inside parseModelValue later (review round 1).
+    if (typeof v === "object" && v !== null && typeof v.model === "string") {
+      // Explicit per-field checks over conditional spreads — an omitted field
+      // and an empty one must not be indistinguishable (review round 1).
+      const out: { model: string; thought?: string; at?: number } = { model: v.model };
+      if (typeof v.thought === "string") {
+        out.thought = v.thought;
+      }
+      if (typeof v.at === "number") {
+        out.at = v.at;
+      }
+      return out;
     }
   } catch {
     // absent/unreadable — caller falls back to the leading model

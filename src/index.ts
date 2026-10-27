@@ -172,17 +172,23 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
     acp
       .agent({ name: AGENT_INFO.name })
       .onRequest("initialize", (ctx) => server.initialize(ctx.params, ctx.client))
-      .onRequest("session/new", async (ctx) => {
-        const result = await newSession(server, ctx.params, ctx.client);
-        for (const sid of server.sessionAliases(result.sessionId)) {
-          sendAvailableCommandsDeferred(
-            server.clients,
-            sid,
-            filterWorkflowCommands(server, allCommands),
-          );
-        }
-        return result;
-      })
+      .onRequest(
+        "session/new",
+        // Wire-accurate parser (review round 1): the SDK default spec requires
+        // mcpServers (v1 spelling); the v2 draft makes it optional.
+        z.object({ cwd: z.string() }).passthrough(),
+        async (ctx) => {
+          const result = await newSession(server, ctx.params, ctx.client);
+          for (const sid of server.sessionAliases(result.sessionId)) {
+            sendAvailableCommandsDeferred(
+              server.clients,
+              sid,
+              filterWorkflowCommands(server, allCommands),
+            );
+          }
+          return result;
+        },
+      )
       .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
       .onRequest("session/resume", async (ctx) => {
         // Replays target the REQUESTING connection only (ctx.client, not the

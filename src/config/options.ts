@@ -25,6 +25,7 @@ import {
   CONFIG_DISPATCH,
   CONFIG_META,
   log,
+  shapeForVersion,
   warn,
   ZCODE_CREDS_PATH,
   zcodePersonalProviderPath,
@@ -219,7 +220,7 @@ export function providerSelectable(pid: string, p: ProviderEntry | undefined): b
       // a disabled plan fails backend-side. ponytail: ceiling: heuristic
       // from local files; upgrade when: the desktop exposes a machine-
       // readable enabled+entitled snapshot the bridge can mirror instead.
-      return Boolean(p.options?.apiKey);
+      return Boolean(p.options?.apiKey) || isEntitledBuiltinProvider(pid);
     }
     if (p.options?.apiKey) return true;
     // An entitled account plan (desktop coding-plan-cache verdict) has no
@@ -594,6 +595,9 @@ export async function buildConfigOptions(
   // session/read thoughtLevel arrives.
   let currentThought = "max";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
+  // Length of the session/read thoughtLevel relay (0 = none) — the snapshot
+  // override below sits outside the try that reads it (review round 1).
+  let tlAvailLength = 0;
   if (zcodeSid === null) {
     // Pending session — no backend to read yet, but the thought vocabulary
     // is per model and the runtime's own source of truth is the enabled
@@ -620,7 +624,7 @@ export async function buildConfigOptions(
     // client speaks; upgrade when: ACP lets config option values carry
     // per-model metadata or clients echo their selection at session/new.
     const last = readGlobalModelChoice();
-    if (last?.model) {
+    if (last && typeof last.model === "string" && last.model.length > 0) {
       const parsed = parseModelValue(last.model);
       const known = candidates.find(
         (m) => m.providerId === parsed.providerId && m.modelId === parsed.modelId,
@@ -668,6 +672,7 @@ export async function buildConfigOptions(
       currentThought =
         (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
       const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
+      tlAvailLength = tlAvail.length;
       if (tlAvail.length > 0) {
         thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
         // setModel can leave the runtime briefly holding the PREVIOUS model's
@@ -737,49 +742,59 @@ export async function buildConfigOptions(
     // above only applies where the local config declares variants — when the
     // snapshot knows the CURRENT model, it wins over both.
     const availList = server.modelAvailability.get(zcodeSid) ?? [];
+    // Provider-aware match ONLY: the same modelId exists under several plans
+    // (GLM-5.3-Flash under coding-plan, start-plan, apikey), so a modelId-only
+    // fallback could take another plan's vocabulary and default.
     const availEntry =
-      availList.find(
-        (m) =>
-          m.modelId === currentModelId &&
-          m.providerId !== undefined &&
-          currentProviderId !== "" &&
-          configProviderIdFor(m.providerId) === configProviderIdFor(currentProviderId),
-      ) ?? availList.find((m) => m.modelId === currentModelId);
+      currentProviderId === ""
+        ? undefined
+        : availList.find(
+            (m) =>
+              m.modelId === currentModelId &&
+              m.providerId !== undefined &&
+              configProviderIdFor(m.providerId) === configProviderIdFor(currentProviderId),
+          );
     // A SINGLE-entry snapshot list is the backend echoing the current default,
     // not a vocabulary (observed 2026-10-27: the create-time snapshot for
     // GLM-5.3-Flash carried levels=[max]; the settled list after
-    // requestRuntimePreferences carried low/high/max). Trusting it would
-    // shrink the picker to one item — a short list only overrides when the
-    // config declares nothing.
-    const declaredFallback = availEntry && (availEntry.levels?.length ?? 0) < 2
-      ? configReasoningVariants(
-          currentProviderId || configProviderIdFor(availEntry.providerId ?? ""),
-          currentModelId,
-        )
-      : null;
-    if (declaredFallback && declaredFallback.variants.length > 0) {
-      thoughtOptions = orderThoughtVariants(declaredFallback.variants);
-      if (!declaredFallback.variants.includes(currentThought)) {
+    // requestRuntimePreferences carried low/high/max). A short snapshot
+    // defers to the model's own config.json declaration and never shrinks
+    // the picker on its own; with no declaration, whatever earlier sources
+    // produced stands (review round 1: no invented fallback).
+    const snapshotLevels = availEntry?.levels ?? [];
+    if (snapshotLevels.length >= 2) {
+      thoughtOptions = orderThoughtVariants(snapshotLevels);
+      if (!snapshotLevels.includes(currentThought)) {
         currentThought =
-          declaredFallback.defaultVariant && declaredFallback.variants.includes(declaredFallback.defaultVariant)
-            ? declaredFallback.defaultVariant
-            : (declaredFallback.variants[0] ?? currentThought);
-      }
-      log(
-        `catalog: thought levels from config (single-level snapshot for ${currentModelId} ignored)`,
-      );
-    } else if (availEntry?.levels && availEntry.levels.length > 0) {
-      thoughtOptions = orderThoughtVariants(availEntry.levels);
-      if (!availEntry.levels.includes(currentThought)) {
-        currentThought =
-          availEntry.defaultLevel && availEntry.levels.includes(availEntry.defaultLevel)
+          availEntry?.defaultLevel && snapshotLevels.includes(availEntry.defaultLevel)
             ? availEntry.defaultLevel
-            : (availEntry.levels[0] ?? currentThought);
+            : (snapshotLevels[0] ?? currentThought);
       }
       log(
         `catalog: thought levels from backend snapshot (model=${currentModelId}, ` +
-          `levels=${availEntry.levels.join("/")})`,
+          `levels=${snapshotLevels.join("/")})`,
       );
+    } else if (tlAvailLength === 0) {
+      // tlAvail non-empty cases are handled by the narrowing inside the
+      // tlAvail branch above (config ∩ backend — a stale config entry can
+      // never advertise a set the backend would reject). This branch covers
+      // a session whose read carried NO relay at all: the config declaration
+      // stands alone, exactly as the pending path trusts it.
+      const declared = configReasoningVariants(currentProviderId, currentModelId);
+      if (declared && declared.variants.length > 0) {
+        thoughtOptions = orderThoughtVariants(declared.variants);
+        if (!declared.variants.includes(currentThought)) {
+          currentThought =
+            declared.defaultVariant && declared.variants.includes(declared.defaultVariant)
+              ? declared.defaultVariant
+              : (declared.variants[0] ?? currentThought);
+        }
+        if (snapshotLevels.length === 1) {
+          log(
+            `catalog: thought levels from config (single-level snapshot for ${currentModelId} ignored)`,
+          );
+        }
+      }
     }
     // Same plan-flag fold as buildModes: a plan-active runtime still reports
     // the underlying mode in settings, and the dropdown must show "plan".
@@ -805,7 +820,10 @@ export async function buildConfigOptions(
     // shows the active selection.
     modelOptions = [{ value: currentModel, name: currentModelId }, ...modelOptions];
   }
-  if (!thoughtOptions) thoughtOptions = [...CONFIG_META.thought.options];
+  // i31 (review round 1): when NO source declares a vocabulary for the model
+  // (config, backend snapshot, session/read relay), the thought option is
+  // OMITTED rather than invented — a static low/high/max list advertised
+  // levels the runtime would reject for models with a different set.
 
   const options: acp.SessionConfigOption[] = [
     {
@@ -824,7 +842,9 @@ export async function buildConfigOptions(
       currentValue: currentMode,
       options: [...CONFIG_META.mode.options],
     },
-    {
+  ];
+  if (thoughtOptions && thoughtOptions.length > 0) {
+    options.push({
       id: "thought",
       name: CONFIG_META.thought.name,
       // Category thought_level (not "thought") so ACP clients recognise the
@@ -836,8 +856,8 @@ export async function buildConfigOptions(
       type: "select",
       currentValue: currentThought,
       options: thoughtOptions,
-    },
-  ];
+    });
+  }
 
   // Read-only quota pseudo-option (ADR-0021): martty-only, no category (never
   // lands in a settings menu), string type per the probe-verified shape — the
@@ -859,14 +879,13 @@ export async function buildConfigOptions(
       currentValue: server.quotaDock,
     } as unknown as acp.SessionConfigOption);
   }
-  // i31: a v2-negotiated connection addresses options by configId (the v2
-  // draft renamed the field); emit both spellings there so either client
-  // parser binds. v1 connections keep today's v1-only object untouched.
-  if (server.negotiatedProtocol(receiverRoot) >= 2) {
-    for (const o of options) {
-      (o as { configId?: string }).configId = o.id;
-    }
-  }
+  // NOTE: options stay VERSION-NEUTRAL (id-only, no configId) — they are
+  // built once and fanned to every attached client (sendSessionUpdateToOthers,
+  // broadcast proxy), and a configId-stamped array would leak v2 bytes to v1
+  // destinations. Per-connection shaping happens at the serialization points:
+  // shapeForVersion stamps configId on v2 responses, and the INITIATOR leg of
+  // config_option_update stamps a clone before its send (see
+  // emitConfigOptionUpdate / dispatch.ts).
   return options;
 }
 
@@ -965,13 +984,18 @@ export async function emitConfigOptionUpdate(
 ): Promise<{ options: acp.SessionConfigOption[]; currentModeId?: string }> {
   const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
   const broadcastSource = isBroadcastSource(cx);
+  // i31: the shared fan-out payload stays version-neutral (id-only — other
+  // destinations may be v1 clients); the INITIATOR leg gets a configId-stamped
+  // clone when this connection negotiated v2. The broadcast proxy has no
+  // connection root, so its single payload stays neutral too.
+  const proto = broadcastSource ? 1 : server.negotiatedProtocol(clientConnectionRoot(cx));
   const send = (update: acp.SessionUpdate): Promise<void> => {
     if (broadcastSource) {
       return Promise.all(
         server.sessionAliases(acpSid).map((sid) => sendSessionUpdate(cx, sid, update)),
       ).then(() => undefined);
     }
-    return sendSessionUpdate(cx, acpSid, update)
+    return sendSessionUpdate(cx, acpSid, shapeForVersion(proto, update))
       .then(() => sendSessionUpdateToOthers(server, cx, acpSid, update))
       .catch((e: unknown) => {
         warn(

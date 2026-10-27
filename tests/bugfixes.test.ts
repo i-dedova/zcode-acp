@@ -20,7 +20,41 @@ import {
   loadAllModels,
   orderThoughtVariants,
 } from "../src/config/options.js";
-import { CONFIG_META } from "../src/utils.js";
+import { CONFIG_META, ZCODE_CREDS_PATH } from "../src/utils.js";
+
+// Pending-catalog tests need a config.json with reasoning declarations; the
+// machine's real file must never leak into expectations.
+let fakeConfigCurrent: unknown = undefined;
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    readFileSync: (p: string | Buffer, ...rest: unknown[]) => {
+      if (typeof p === "string" && p === ZCODE_CREDS_PATH && fakeConfigCurrent !== undefined) {
+        return JSON.stringify(fakeConfigCurrent);
+      }
+      type ReadFn = (p: string | Buffer, ...rest: unknown[]) => string | Buffer;
+      return (actual.readFileSync as unknown as ReadFn)(p, ...rest);
+    },
+  };
+});
+// The cross-session last-choice store is stubbed so tests are deterministic.
+const lc = vi.hoisted(() => {
+  let last: { model?: string; thought?: string } | undefined;
+  return {
+    setLast: (v: typeof last) => {
+      last = v;
+    },
+    read: () => last,
+  };
+});
+vi.mock("../src/lazy-sessions.js", () => ({
+  recordModelChoice: () => {},
+  recordGlobalModelChoice: (patch: { model?: string; thought?: string }) => {
+    lc.setLast({ ...lc.read(), ...patch });
+  },
+  readGlobalModelChoice: () => lc.read(),
+}));
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
@@ -243,11 +277,10 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses thought_level category, Thought Level name, lowercase option names", () => {
     expect(CONFIG_META.thought.category).toBe("thought_level");
     expect(CONFIG_META.thought.name).toBe("Thought Level");
-    // The static fallback matches the default coding-plan model's real
-    // vocabulary (runtime-verified); the live per-model list comes from the
-    // enabled provider's reasoning.variants instead of this constant.
-    const names = CONFIG_META.thought.options.map((o) => o.name);
-    expect(names).toEqual(["low", "high", "max"]);
+    // No static vocabulary since the i31 review round: a fallback list
+    // invented levels the runtime rejects for models with a different set.
+    // The per-model vocabulary comes from config/snapshot/session-read only.
+    expect((CONFIG_META.thought as { options?: unknown }).options).toBeUndefined();
   });
 
   it("uses lowercase mode option names", () => {
@@ -259,17 +292,36 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
 });
 
 describe("Bug 6: thought option is discoverable and honest", () => {
-  it("advertises the spec category thought_level on the pending session", async () => {
+  it("advertises the spec category thought_level when a vocabulary is declared", async () => {
     // Regression: the category was a bare "thought", which is not one of the
     // ACP spec's reserved SessionConfigOptionCategory names (mode/model/
     // model_config/thought_level) — clients keying on the standard tokens
     // (effort pickers in editors and orchestrators) could not find the
-    // reasoning selector at all.
-    const server = new ZcodeAcpServer();
-    const options = await buildConfigOptions(server, null);
-    const thought = options.find((o) => o.id === "thought");
-    expect(thought?.category).toBe("thought_level");
-    expect(thought?.options.length).toBeGreaterThan(0);
+    // reasoning selector at all. Since the i31 review round the option is
+    // OMITTED when nothing declares a vocabulary — never invented.
+    lc.setLast(undefined);
+    fakeConfigCurrent = {
+      provider: {
+        "builtin:zai-coding-plan": {
+          name: "Z.AI Individual Coding Plan",
+          enabled: true,
+          options: { apiKey: "k" },
+          models: {
+            "GLM-5.3-Flash": { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+          },
+        },
+      },
+    };
+    try {
+      const server = new ZcodeAcpServer();
+      const options = await buildConfigOptions(server, null);
+      const thought = options.find((o) => o.id === "thought");
+      expect(thought?.category).toBe("thought_level");
+      expect(thought?.options.length).toBeGreaterThan(0);
+      expect(thought?.options.map((o) => o.value)).toEqual(["low", "high", "max"]);
+    } finally {
+      fakeConfigCurrent = undefined;
+    }
   });
 
   it("orders thought variants canonically and keeps unknown tokens last", () => {

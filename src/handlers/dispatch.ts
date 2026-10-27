@@ -27,7 +27,7 @@ import {
 import { messages } from "../i18n.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { clientConnectionRoot, warn } from "../utils.js";
+import { clientConnectionRoot, shapeForVersion, warn } from "../utils.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "./io.js";
 
 /** True once the EPERM hint fired for this process — throttled to one shot. */
@@ -166,7 +166,13 @@ async function dispatchConfigChanged(
       sessionUpdate: "config_option_update",
       configOptions: options,
     };
-    await sendSessionUpdate(cx, acpSid, configUpdate);
+    // i31: initiator leg carries configId when this connection negotiated
+    // v2; the shared fan-out below stays version-neutral (id-only) because
+    // other destinations may be v1 clients.
+    const dispatchProto = isBroadcastSource(cx)
+      ? 1
+      : server.negotiatedProtocol(clientConnectionRoot(cx));
+    await sendSessionUpdate(cx, acpSid, shapeForVersion(dispatchProto, configUpdate));
     // Settings are per-session: the CLI's /model or the phone's dropdown must
     // reach every OTHER attached client too. The broadcast proxy already
     // reached everyone with the send above — an "others" leg on it would

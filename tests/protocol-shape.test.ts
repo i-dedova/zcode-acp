@@ -12,11 +12,19 @@ describe("negotiateProtocolVersion", () => {
     expect(negotiateProtocolVersion(2)).toBe(2);
   });
 
-  it("falls back to the highest supported version for unknown offers", () => {
+  it("answers our highest for a NEWER offer than we speak", () => {
     expect(negotiateProtocolVersion(3)).toBe(2);
-    expect(negotiateProtocolVersion(undefined)).toBe(2);
-    expect(negotiateProtocolVersion(null)).toBe(2);
-    expect(negotiateProtocolVersion(Number.NaN)).toBe(2);
+  });
+
+  it("never upgrades a missing or malformed offer to v2 (review round 1)", () => {
+    // A client whose version we cannot parse gets the v1 wire shape every
+    // ACP client tolerates — not mode-less configId traffic it never
+    // negotiated.
+    expect(negotiateProtocolVersion(undefined)).toBe(1);
+    expect(negotiateProtocolVersion(null)).toBe(1);
+    expect(negotiateProtocolVersion(Number.NaN)).toBe(1);
+    expect(negotiateProtocolVersion(0)).toBe(1);
+    expect(negotiateProtocolVersion(1.5)).toBe(1);
   });
 });
 

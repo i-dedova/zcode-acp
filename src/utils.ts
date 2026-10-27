@@ -23,26 +23,45 @@ export const PROTOCOL_VERSION = 1;
 export const HIGHEST_PROTOCOL_VERSION = 2;
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([1, 2]);
 
-/** ACP spec: answer the client's version if supported, else our latest. */
+/** ACP spec: answer the client's version if supported, else our latest.
+ *  A MISSING/garbage offer upgrades to nothing — those clients get v1, the
+ *  wire shape every ACP client tolerates (a v2 answer to a client we cannot
+ *  parse would send it mode-less, configId-keyed traffic it never
+ *  negotiated). A NEWER offer than we speak gets our highest. */
 export function negotiateProtocolVersion(offered: number | undefined | null): number {
-  const v = typeof offered === "number" && Number.isFinite(offered) ? Math.trunc(offered) : NaN;
-  return SUPPORTED_PROTOCOL_VERSIONS.has(v) ? v : HIGHEST_PROTOCOL_VERSION;
+  if (typeof offered !== "number" || !Number.isInteger(offered)) {
+    return PROTOCOL_VERSION;
+  }
+  if (SUPPORTED_PROTOCOL_VERSIONS.has(offered)) {
+    return offered;
+  }
+  return offered > HIGHEST_PROTOCOL_VERSION ? HIGHEST_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
 /**
- * Strip the fields a v2 response must not carry. v1 keeps the object
- * untouched (byte-identical traffic for v1 clients). ponytail: ceiling: only
- * the top-level `modes` field is version-gated (mode already rides as a
- * category:"mode" configOption); upgrade when: a v2 client rejects another
- * v1-era field or the v2 draft leaves draft status with more renames.
+ * Shape a per-connection response for the negotiated protocol: v2 drops the
+ * removed top-level `modes` field (mode rides as the category:"mode"
+ * configOption) and stamps configId next to id on every config option; v1
+ * keeps the object untouched (byte-identical traffic for v1 clients).
+ * ponytail: ceiling: only `modes` is version-gated and only configId is
+ * stamped; upgrade when: the v2 draft leaves draft status with more renames.
  */
-export function shapeForVersion<T extends { modes?: unknown }>(version: number, resp: T): T {
-  if (version < 2) {
+export function shapeForVersion<T>(version: number, resp: T): T {
+  if (version < 2 || resp === null || typeof resp !== "object") {
     return resp;
   }
-  const copy = { ...resp };
-  delete (copy as { modes?: unknown }).modes;
-  return copy;
+  const copy = { ...(resp as Record<string, unknown>) };
+  delete copy.modes;
+  const opts = copy.configOptions;
+  if (Array.isArray(opts)) {
+    copy.configOptions = opts.map((o) => {
+      if (o && typeof o === "object" && typeof (o as { id?: unknown }).id === "string") {
+        return { ...o, configId: (o as { id: string }).id };
+      }
+      return o;
+    });
+  }
+  return copy as T;
 }
 
 /** Wire spellings of a session/set_config_option value: v1 bare id, the v1
@@ -232,15 +251,11 @@ export const CONFIG_META = {
   thought: {
     name: "Thought Level",
     category: "thought_level",
-    // Fallback only — the real vocabulary is per model (read from the
-    // enabled provider's models[].reasoning.variants). These values match
-    // the default coding-plan model (GLM-5.3): low/high/max, verified
-    // against the runtime's own session/read.
-    options: [
-      { value: "low", name: "low" },
-      { value: "high", name: "high" },
-      { value: "max", name: "max" },
-    ],
+    // NO static vocabulary (i31 review round 1): a fallback list invented
+    // levels the runtime rejects for models with a different set. The option
+    // is omitted entirely when no source declares a vocabulary — the real
+    // one is per model, from config.json reasoning.variants, the backend
+    // snapshot, or the session/read relay.
   },
 } as const;
 

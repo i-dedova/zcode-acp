@@ -455,7 +455,12 @@ export const BOOT_RESUME_TRIGGER = "resume session";
  */
 export async function newSession(
   server: ZcodeAcpServer,
-  params: acp.NewSessionRequest,
+  // mcpServers optional: the ACP v2 draft made it optional and T3 Code
+  // negotiates v2 (review round 1) — a v2-legal session/new without it must
+  // pass the wire parser instead of failing v1 validation with -32602.
+  params: Omit<acp.NewSessionRequest, "mcpServers"> & {
+    mcpServers?: acp.NewSessionRequest["mcpServers"];
+  },
   client?: acp.AgentContext,
 ): Promise<acp.NewSessionResponse> {
   // Martty bookkeeping (ADR-0021): start the lazy refresher when THIS
