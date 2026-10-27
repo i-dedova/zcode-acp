@@ -2596,13 +2596,16 @@ export async function setConfigOptionHandler(
   // The `quota` option (ADR-0021) is a read-only display channel for the TUI
   // dock — setting it is a no-op that returns the current options unchanged.
   if (params.configId === "quota") {
-    return {
+    // Shaped per connection (review round 2): the set response is the one
+    // payload T3 re-applies after every switch — it must carry configId on
+    // v2 exactly like new/resume/load do.
+    return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(cx)), {
       configOptions: await buildConfigOptions(
         server,
         server.resolveSid(params.sessionId) ?? null,
         clientConnectionRoot(cx),
       ),
-    };
+    });
   }
   // Materialize a lazy session/new placeholder on first use.
   const zcodeSid = await ensureRealSession(server, params.sessionId);
@@ -2624,7 +2627,9 @@ export async function setConfigOptionHandler(
     zcodeSid,
     result.kind,
   );
-  return { configOptions: options };
+  return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(cx)), {
+    configOptions: options,
+  });
 }
 
 /**
@@ -4619,10 +4624,16 @@ export async function emitModeIfChanged(
     if (last === modes.currentModeId) return;
     server.lastMode.set(acpSid, modes.currentModeId);
     const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-    await sendSessionUpdate(cx, acpSid, {
-      sessionUpdate: "config_option_update",
-      configOptions: options,
-    });
+    // Initiator leg (review round 2): the prompting client's own update
+    // carries configId when it negotiated v2, matching its set responses.
+    await sendSessionUpdate(
+      cx,
+      acpSid,
+      shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(cx)), {
+        sessionUpdate: "config_option_update",
+        configOptions: options,
+      }),
+    );
     await sendSessionUpdate(cx, acpSid, {
       sessionUpdate: "current_mode_update",
       currentModeId: modes.currentModeId,

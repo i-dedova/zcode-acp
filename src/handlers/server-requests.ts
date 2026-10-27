@@ -58,7 +58,7 @@ import {
   pushSourceLabel,
 } from "../push/push.js";
 import { type ClientLike } from "../remote/broadcast.js";
-import { clientConnectionRoot, log, warn } from "../utils.js";
+import { clientConnectionRoot, log, shapeForVersion, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 
@@ -97,10 +97,16 @@ async function emitModeViaConfigOption(
     const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
     const modeOpt = options.find((o) => o.id === "mode");
     if (modeOpt) modeOpt.currentValue = modes.currentModeId;
-    await sendSessionUpdate(cx, acpSid, {
-      sessionUpdate: "config_option_update",
-      configOptions: options,
-    });
+    // Initiator leg (review round 2): shaped per connection like every other
+    // cx-addressed options update.
+    await sendSessionUpdate(
+      cx,
+      acpSid,
+      shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(cx)), {
+        sessionUpdate: "config_option_update",
+        configOptions: options,
+      }),
+    );
   } catch (e) {
     warn(`emitModeViaConfigOption failed: ${e instanceof Error ? e.message : String(e)}`);
   }
