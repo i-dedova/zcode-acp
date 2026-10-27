@@ -57,6 +57,24 @@ vi.mock("node:fs", async () => {
   };
 });
 
+/** Deterministic stand-in for the cross-session last-choice store. */
+const lc = vi.hoisted(() => {
+  let last: { model?: string; thought?: string } | undefined;
+  return {
+    setLast: (v: typeof last) => {
+      last = v;
+    },
+    read: () => last,
+  };
+});
+vi.mock("../src/lazy-sessions.js", () => ({
+  recordModelChoice: () => {},
+  recordGlobalModelChoice: (patch: { model?: string; thought?: string }) => {
+    lc.setLast({ ...lc.read(), ...patch });
+  },
+  readGlobalModelChoice: () => lc.read(),
+}));
+
 /** Fake backend answering session/read with the GENERIC builtin advertisement. */
 class FakeBackend {
   isDead = false;
@@ -194,5 +212,45 @@ describe("thought-level narrowing (i31 fork patch)", () => {
     const thought = await thoughtOption(server);
     expect(thought?.options.map((o) => o.value)).toEqual(["low", "high", "max"]);
     expect(thought?.currentValue).toBe("max");
+  });
+});
+
+describe("pending composer catalog (i31 patch 2)", () => {
+  it("starts on the last-used model and advertises its declared variants", async () => {
+    lc.setLast({ model: "builtin:zai-coding-plan\\GLM-5.3-Flash" });
+    // Leading entry (first config key) is GLM-5.3 — the last choice must
+    // win over it and drive the thought vocabulary.
+    await setConfig({
+      "GLM-5.3": { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+      [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+    });
+    const options = await buildConfigOptions(new ZcodeAcpServer(), null);
+    const model = options.find((o) => o.id === "model");
+    const thought = options.find((o) => o.id === "thought");
+    expect(model?.currentValue).toBe("builtin:zai-coding-plan\\GLM-5.3-Flash");
+    expect(thought?.options.map((o) => o.value)).toEqual(["low", "high", "max"]);
+    expect(thought?.currentValue).toBe("max");
+  });
+
+  it("falls back to the leading model when no last choice exists", async () => {
+    lc.setLast(undefined);
+    await setConfig({
+      "GLM-5.3": { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+      [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+    });
+    const options = await buildConfigOptions(new ZcodeAcpServer(), null);
+    const model = options.find((o) => o.id === "model");
+    expect(model?.currentValue).toBe("builtin:zai-coding-plan\\GLM-5.3");
+  });
+
+  it("falls back to the leading model when the last choice is foreign", async () => {
+    lc.setLast({ model: "deleted-provider\\GONE" });
+    await setConfig({
+      "GLM-5.3": { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+      [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high", "max"], defaultVariant: "max" } },
+    });
+    const options = await buildConfigOptions(new ZcodeAcpServer(), null);
+    const model = options.find((o) => o.id === "model");
+    expect(model?.currentValue).toBe("builtin:zai-coding-plan\\GLM-5.3");
   });
 });

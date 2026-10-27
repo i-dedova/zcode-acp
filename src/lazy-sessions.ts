@@ -240,3 +240,54 @@ export function loadAliasesByZcodeSid(): Map<string, string> {
   }
   return new Map([...newest.entries()].map(([sid, v]) => [sid, v.acpSid]));
 }
+
+/**
+ * The LAST model/thought choice recorded across ALL sessions, in a sibling
+ * file (the alias table is per-acpSid by design and a brand-new composer has
+ * no alias yet). The pending-composer catalog reads this to start on the
+ * user's last selection — the desktop composer convention — instead of
+ * whichever provider sorts first in config.json. Best-effort both ways: a
+ * failed write or read falls back to the leading model.
+ */
+const LAST_CHOICE_FILENAME = "acp-last-model-choice.json";
+
+function lastChoicePath(): string {
+  return path.join(zcodeHomeDir(), "v2", LAST_CHOICE_FILENAME);
+}
+
+export function recordGlobalModelChoice(patch: { model?: string; thought?: string }): void {
+  try {
+    const p = lastChoicePath();
+    let prev: { model?: string; thought?: string; at?: number } = {};
+    try {
+      prev = JSON.parse(readFileSync(p, "utf8")) as typeof prev;
+    } catch {
+      // fresh file — start empty
+    }
+    const next = { ...prev, ...patch, at: Date.now() };
+    mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2));
+    renameSync(tmp, p);
+  } catch (e) {
+    warn(`lazy-sessions: last-choice write failed (${e instanceof Error ? e.message : String(e)})`);
+  }
+}
+
+export function readGlobalModelChoice():
+  | { model?: string; thought?: string; at?: number }
+  | undefined {
+  try {
+    const v = JSON.parse(readFileSync(lastChoicePath(), "utf8")) as {
+      model?: string;
+      thought?: string;
+      at?: number;
+    };
+    if (typeof v === "object" && v !== null) {
+      return v;
+    }
+  } catch {
+    // absent/unreadable — caller falls back to the leading model
+  }
+  return undefined;
+}

@@ -15,7 +15,11 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { backendCapabilities } from "../backend/adapter.js";
 import type { ZcodeReadResult } from "../backend/types.js";
-import { recordModelChoice } from "../lazy-sessions.js";
+import {
+  readGlobalModelChoice,
+  recordGlobalModelChoice,
+  recordModelChoice,
+} from "../lazy-sessions.js";
 import {
   clientConnectionRoot,
   CONFIG_DISPATCH,
@@ -206,13 +210,21 @@ export interface ModelRef {
 export function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
   if (!p) return false;
   if (isBuiltinProvider(pid)) {
-    if (p.enabled !== true) return false;
+    if (p.enabled !== true) {
+      // i31 operator ruling 2026-10-27: configured plans stay VISIBLE even
+      // while the enabled flag or the desktop cache verdict says unavailable
+      // (start-plan ships enabled:false + a stored key, and the desktop
+      // picker lists it). Visibility is not switchability — a switch against
+      // a disabled plan fails backend-side. ponytail: ceiling: heuristic
+      // from local files; upgrade when: the desktop exposes a machine-
+      // readable enabled+entitled snapshot the bridge can mirror instead.
+      return Boolean(p.options?.apiKey);
+    }
     if (p.options?.apiKey) return true;
-    // i31: an entitled account plan (desktop coding-plan-cache verdict) has
-    // no inline key — its credential is the signed-in account itself. Without
+    // An entitled account plan (desktop coding-plan-cache verdict) has no
+    // inline key — its credential is the signed-in account itself. Without
     // this branch the plan's models never reach the dropdown even though the
-    // backend registry lists the provider (observed 2026-10-27: start-plan
-    // entitled yet absent from every picker).
+    // backend registry lists the provider.
     return isEntitledBuiltinProvider(pid);
   }
   if (p.enabled === false) return false;
@@ -579,7 +591,25 @@ export async function buildConfigOptions(
     // relays the options into a picker (Multica's effort selector) would
     // otherwise offer tokens the runtime rejects ("nothink" was fiction,
     // "low" was missing).
-    const cur = loadAllModels()[0];
+    const candidates = loadAllModels();
+    let cur = candidates[0];
+    // i31: start on the user's LAST-USED model (the desktop composer
+    // convention), not whichever provider sorts first in config.json — the
+    // leading entry's vocabulary is what a client shows until a model switch
+    // lands, and T3 overlays its own remembered selection on top of it
+    // (observed 2026-10-27: composer displayed GLM-5.3-Flash over a
+    // Qwen-vocabulary effort list). Foreign/deleted choices fall back to the
+    // leading entry.
+    const last = readGlobalModelChoice();
+    if (last?.model) {
+      const parsed = parseModelValue(last.model);
+      const known = candidates.find(
+        (m) => m.providerId === parsed.providerId && m.modelId === parsed.modelId,
+      );
+      if (known) {
+        cur = known;
+      }
+    }
     if (cur) {
       // The advertised current model follows the dropdown's leading entry
       // (the enabled provider's first model — what the runtime actually
@@ -857,6 +887,10 @@ export function rememberModelChoice(
     at,
   });
   if (acpSid) recordModelChoice(acpSid, { ...patch, at });
+  // Also the cross-session "last used" record the pending-composer catalog
+  // starts from — a composer has no alias yet, and the desktop convention is
+  // to open on the user's last selection.
+  recordGlobalModelChoice(patch);
 }
 
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.
