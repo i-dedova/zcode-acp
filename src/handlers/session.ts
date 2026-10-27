@@ -78,7 +78,15 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { clientConnectionRoot, log, warn, zcodeHomeDir } from "../utils.js";
+import {
+  clientConnectionRoot,
+  coerceConfigValueId,
+  log,
+  shapeForVersion,
+  warn,
+  zcodeHomeDir,
+  type ConfigOptionWireValue,
+} from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import {
@@ -509,11 +517,11 @@ export async function newSession(
     server.lastMode.set(bindSid, modes.currentModeId);
     emitBootUsageUpdate(server, bindSid);
     scheduleQuotaDockBackstop(server);
-    return {
+    return shapeForVersion(server.negotiatedProtocol(bindRoot), {
       sessionId: bindSid,
       modes,
       configOptions: await buildConfigOptions(server, null, bindRoot),
-    };
+    });
   }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
@@ -567,11 +575,11 @@ export async function newSession(
       }
       emitBootUsageUpdate(server, bootResume);
       scheduleQuotaDockBackstop(server);
-      return {
+      return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(client)), {
         sessionId: bootResume,
         modes: loaded.modes,
         configOptions: loaded.configOptions,
-      };
+      });
     } catch (e) {
       warn(
         `session/new: boot-resume of ${bootResume} failed (` +
@@ -623,11 +631,11 @@ export async function newSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
   scheduleQuotaDockBackstop(server);
-  return {
+  return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(client)), {
     sessionId: acpSid,
     modes,
     configOptions: await buildConfigOptions(server, null, clientConnectionRoot(client)),
-  };
+  });
 }
 
 /**
@@ -1256,10 +1264,10 @@ export async function resumeSession(
   const modes = await buildModes(server, zcodeSid);
   server.lastMode.set(acpSid, modes.currentModeId);
   scheduleQuotaDockBackstop(server);
-  return {
+  return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(cx)), {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
-  };
+  });
 }
 
 /**
@@ -1593,7 +1601,10 @@ export async function loadSession(
     replayMeta: { ...slice.meta, turnActive },
   };
   scheduleQuotaDockBackstop(server);
-  return result as acp.LoadSessionResponse;
+  return shapeForVersion(
+    server.negotiatedProtocol(clientConnectionRoot(cx)),
+    result,
+  ) as acp.LoadSessionResponse;
 }
 
 /**
@@ -2562,11 +2573,20 @@ const DRAIN_WINDOW_MS = 90_000;
  */
 export async function setConfigOptionHandler(
   server: ZcodeAcpServer,
-  params: acp.SetSessionConfigOptionRequest,
+  // The union lets the wire-accurate parser in index.ts pass its params
+  // without a type assertion: the custom schema accepts both protocols'
+  // value spellings, the acp type only describes the v1 ones.
+  params:
+    | acp.SetSessionConfigOptionRequest
+    | { sessionId: string; configId: string; value: ConfigOptionWireValue },
   cx: acp.AgentContext,
 ): Promise<acp.SetSessionConfigOptionResponse> {
-  if (typeof params.value !== "string") {
-    throw new Error(`unsupported config value type: ${String(params.value)}`);
+  // i31: v2 wraps select values in the discriminated {type:"id", value}
+  // envelope — unwrap it so the v1-era string handling below serves both
+  // spellings.
+  const value = coerceConfigValueId(params.value);
+  if (typeof value !== "string") {
+    throw new Error(`unsupported config value type: ${String(value)}`);
   }
   // The `quota` option (ADR-0021) is a read-only display channel for the TUI
   // dock — setting it is a no-op that returns the current options unchanged.
@@ -2586,7 +2606,7 @@ export async function setConfigOptionHandler(
     server,
     zcodeSid,
     params.configId,
-    params.value,
+    value,
     params.sessionId,
   );
   if (!result) {

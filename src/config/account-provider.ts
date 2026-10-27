@@ -282,6 +282,38 @@ function entitledBuiltinProviders(): Set<string> {
 }
 
 /**
+ * Whether a config.json builtin provider id is backed by an entitled account
+ * plan. Entitlement (coding-plan-cache verdict) is the desktop's own
+ * availability answer for plan providers, whose entries carry no inline
+ * apiKey — credential is the signed-in account itself. Spellings are
+ * normalized in both directions (`builtin:<f>-<plan>` ↔ `account:<f>-<plan>`)
+ * since the entitled set, the cache and config.json have historically mixed
+ * them (see the source comments above).
+ */
+export function isEntitledBuiltinProvider(providerId: string): boolean {
+  const entitled = entitledBuiltinProviders();
+  return (
+    entitled.has(providerId) ||
+    entitled.has(configProviderIdFor(providerId)) ||
+    entitled.has(accountProviderIdFor(providerId))
+  );
+}
+
+/**
+ * The model ids the bundled table declares for a builtin provider — plan
+ * providers keep their catalog in the table (`builtinModelIds`), not in
+ * config.json (`provider.<id>.models`), so the dropdown needs this fallback
+ * to list start-plan/other-plan models at all (i31: start-plan was entitled
+ * yet absent from every picker).
+ */
+export function builtinTableModelIds(providerId: string): string[] {
+  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+    (r) => r.providerId === accountProviderIdFor(providerId),
+  );
+  return rule?.config?.builtinModelIds ?? [];
+}
+
+/**
  * The request auth the bridge can serve for an `account:*` coding-plan model,
  * or null when it cannot answer.
  *

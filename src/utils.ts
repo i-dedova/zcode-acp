@@ -13,6 +13,57 @@ import { debugEnabled } from "./config/settings.js";
 
 /** ACP protocol version this server speaks. */
 export const PROTOCOL_VERSION = 1;
+/**
+ * Highest ACP protocol version this server can serve (i31 patch 2): the v2
+ * draft's session/catalog shapes (configId-keyed options, no top-level
+ * `modes`). initialize() echoes the client's offered version when supported —
+ * T3 Code initializes at v2 — and anything else gets PROTOCOL_VERSION, so a
+ * v1-only client (BrowserOS) keeps byte-identical traffic.
+ */
+export const HIGHEST_PROTOCOL_VERSION = 2;
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([1, 2]);
+
+/** ACP spec: answer the client's version if supported, else our latest. */
+export function negotiateProtocolVersion(offered: number | undefined | null): number {
+  const v = typeof offered === "number" && Number.isFinite(offered) ? Math.trunc(offered) : NaN;
+  return SUPPORTED_PROTOCOL_VERSIONS.has(v) ? v : HIGHEST_PROTOCOL_VERSION;
+}
+
+/**
+ * Strip the fields a v2 response must not carry. v1 keeps the object
+ * untouched (byte-identical traffic for v1 clients). ponytail: ceiling: only
+ * the top-level `modes` field is version-gated (mode already rides as a
+ * category:"mode" configOption); upgrade when: a v2 client rejects another
+ * v1-era field or the v2 draft leaves draft status with more renames.
+ */
+export function shapeForVersion<T extends { modes?: unknown }>(version: number, resp: T): T {
+  if (version < 2) {
+    return resp;
+  }
+  const copy = { ...resp };
+  delete (copy as { modes?: unknown }).modes;
+  return copy;
+}
+
+/** Wire spellings of a session/set_config_option value: v1 bare id, the v1
+ *  boolean envelope, and the v2 discriminated envelope. */
+export type ConfigOptionWireValue = string | boolean | { type?: string; value?: unknown };
+
+/**
+ * Accept both value spellings of session/set_config_option: v1 sends a bare
+ * value (string id, or the {type:"boolean", value} envelope), v2 always wraps
+ * in the discriminated envelope ({type:"id", value}). Returns the inner value
+ * for the id envelope ("" when the envelope is malformed), anything else
+ * untouched.
+ */
+export function coerceConfigValueId(value: ConfigOptionWireValue): ConfigOptionWireValue {
+  if (typeof value === "object" && value !== null && value.type === "id") {
+    return typeof value.value === "string" || typeof value.value === "boolean"
+      ? value.value
+      : "";
+  }
+  return value;
+}
 
 /**
  * Package version, read once from package.json. Kept in sync with releases by

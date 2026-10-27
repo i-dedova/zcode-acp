@@ -251,8 +251,26 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
           ctx.client,
         );
       })
-      .onRequest("session/set_config_option", (ctx) =>
-        setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
+      .onRequest(
+        "session/set_config_option",
+        // i31: the SDK's default spec validates the v1 value spellings only
+        // (bare string, or the boolean envelope) and would answer -32602 to a
+        // negotiated-v2 client sending the discriminated {type:"id", value}
+        // envelope before the handler's coercion ever runs. This parser
+        // accepts both protocols' shapes; setConfigOptionHandler unwraps the
+        // envelope.
+        z
+          .object({
+            sessionId: z.string(),
+            configId: z.string(),
+            value: z.union([
+              z.string(),
+              z.boolean(),
+              z.object({ type: z.string(), value: z.unknown() }).passthrough(),
+            ]),
+          })
+          .passthrough(),
+        (ctx) => setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
       )
       // ZCode-specific extensions (non-standard ACP methods). Use a passthrough
       // zod parser so all param fields survive into the handler.

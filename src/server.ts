@@ -37,7 +37,14 @@ import { pushInteractionIfOffline } from "./push/push.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { envWithLoginShell } from "./remote/login-shell-env.js";
 import { stopAllWorkflowRunPollers } from "./workflow/poller.js";
-import { AGENT_INFO, clientConnectionRoot, PROTOCOL_VERSION, log, warn } from "./utils.js";
+import {
+  AGENT_INFO,
+  clientConnectionRoot,
+  negotiateProtocolVersion,
+  PROTOCOL_VERSION,
+  log,
+  warn,
+} from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
 export interface ClientCapabilities {
@@ -541,6 +548,22 @@ export class ZcodeAcpServer {
     string,
     Array<{ providerId?: string; modelId?: string; defaultLevel?: string; levels?: string[] }>
   >();
+  /**
+   * Per-connection negotiated ACP protocol version (i31 patch 2), keyed by
+   * clientConnectionRoot like marttyConnectionRoots. initialize() records the
+   * echoed version; the catalog/update builders consult it to emit the
+   * connection's wire shape — v1 connections keep byte-identical traffic.
+   * ponytail: ceiling: map grows one entry per connection for the process
+   * lifetime; upgrade when: a long-lived multi-client hub process shows root
+   * accumulation (add disconnect pruning keyed like the roots set).
+   */
+  readonly connectionProtocol = new Map<unknown, number>();
+
+  /** The ACP version negotiated with this connection's initialize (1 default). */
+  negotiatedProtocol(receiverRoot?: unknown): number {
+    const v = receiverRoot === undefined ? undefined : this.connectionProtocol.get(receiverRoot);
+    return v ?? PROTOCOL_VERSION;
+  }
   /**
    * Per-session (zcodeSid) background-task listeners. Registered once when a
    * session is created/resumed/loaded and lives across prompts, forwarding
@@ -1188,15 +1211,23 @@ export class ZcodeAcpServer {
       if (root !== undefined) this.marttyConnectionRoots.add(root);
     }
     this.mergeClientCapabilities((params.clientCapabilities as ClientCapabilities) ?? {});
+    // i31: ACP negotiation — answer the client's offered version when we can
+    // serve it (T3 Code offers the v2 draft) and record it per connection so
+    // every response/update builder emits that connection's wire shape.
+    const negotiated = negotiateProtocolVersion(params.protocolVersion);
+    if (client) {
+      this.connectionProtocol.set(clientConnectionRoot(client), negotiated);
+    }
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +
+        `, negotiated=${negotiated}` +
         `, client=${clientInfo?.name ?? "unknown"}` +
         `, version=${clientInfo?.version ?? "unknown"}` +
         `, elicitation.form=${this.clientCapabilities.elicitation?.form == null ? "no" : "yes"}`,
     );
 
     return {
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: negotiated,
       agentInfo: { ...AGENT_INFO },
       agentCapabilities: {
         loadSession: true,

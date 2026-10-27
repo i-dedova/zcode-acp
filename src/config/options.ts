@@ -27,7 +27,12 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor } from "./account-provider.js";
+import {
+  accountProviderIdFor,
+  builtinTableModelIds,
+  configProviderIdFor,
+  isEntitledBuiltinProvider,
+} from "./account-provider.js";
 import { initialSessionMode } from "./settings.js";
 
 interface ProviderModelsJson {
@@ -200,7 +205,16 @@ export interface ModelRef {
  */
 export function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
   if (!p) return false;
-  if (isBuiltinProvider(pid)) return p.enabled === true && Boolean(p.options?.apiKey);
+  if (isBuiltinProvider(pid)) {
+    if (p.enabled !== true) return false;
+    if (p.options?.apiKey) return true;
+    // i31: an entitled account plan (desktop coding-plan-cache verdict) has
+    // no inline key — its credential is the signed-in account itself. Without
+    // this branch the plan's models never reach the dropdown even though the
+    // backend registry lists the provider (observed 2026-10-27: start-plan
+    // entitled yet absent from every picker).
+    return isEntitledBuiltinProvider(pid);
+  }
   if (p.enabled === false) return false;
   if (p.options?.apiKey) return true;
   if (p.options?.apiKeyRequired === false) return true;
@@ -276,10 +290,18 @@ export function loadAllModels(): ModelRef[] {
       // providers keep the union: their catalog comes from the account
       // snapshot, and a personal rule is an override, not a complete list.
       const personalIds = personal?.modelsByProvider.get(pid);
-      const ids =
-        personalIds !== undefined && !isBuiltinProvider(pid)
-          ? new Set(personalIds)
-          : new Set([...Object.keys(p.models ?? {}), ...(personalIds ?? [])]);
+      const localIds = [...Object.keys(p.models ?? {}), ...(personalIds ?? [])];
+      let ids: Set<string>;
+      if (personalIds !== undefined && !isBuiltinProvider(pid)) {
+        ids = new Set(personalIds);
+      } else if (localIds.length > 0) {
+        ids = new Set(localIds);
+      } else {
+        // i31: plan providers keep their catalog in the bundled table, not in
+        // config.json — an entitled-but-model-less entry would otherwise be
+        // selectable yet empty.
+        ids = new Set(builtinTableModelIds(pid));
+      }
       for (const modelId of ids) {
         out.push({ providerId: pid, providerName, modelId });
       }
@@ -492,6 +514,42 @@ export function orderThoughtVariants(variants: string[]): Array<{ value: string;
   return [...known, ...extra].map((t) => ({ value: t, name: t }));
 }
 
+/**
+ * The reasoning declaration for one model from the local config, resolving
+ * the provider id across the historical config.json spellings (keys have
+ * mixed `builtin:`-prefixed, `account:`-style and legacy bare ids). Returns
+ * null when the config declares nothing — callers keep their wider source.
+ */
+function configReasoningVariants(
+  providerId: string,
+  modelId: string,
+): { variants: string[]; defaultVariant?: string } | null {
+  try {
+    const cfg = readConfig() as ConfigShape;
+    const pidKey = [
+      providerId,
+      configProviderIdFor(providerId),
+      accountProviderIdFor(providerId),
+    ].find((k) => cfg.provider?.[k] !== undefined);
+    if (!pidKey) return null;
+    const m = (
+      cfg.provider?.[pidKey]?.models as
+        | Record<
+            string,
+            { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
+          >
+        | undefined
+    )?.[modelId];
+    const reasoning = m?.reasoning;
+    if (!reasoning || reasoning.enabled === false) return null;
+    if (!reasoning.variants || reasoning.variants.length === 0) return null;
+    return { variants: reasoning.variants, defaultVariant: reasoning.defaultVariant };
+  } catch {
+    // unreadable config — the caller's wider source stands
+    return null;
+  }
+}
+
 /** Build the ACP configOptions array (3 items: model/mode/thought).
  *  zcodeSid null = pending session — skip the backend read and use defaults;
  *  mode defaults to the configured initial mode (initialSessionMode — what
@@ -531,24 +589,11 @@ export async function buildConfigOptions(
       // wrong model whenever the requested id happened to match it.
       currentProviderId = cur.providerId;
       currentModelId = cur.modelId;
-      try {
-        const cfg = readConfig() as ConfigShape;
-        const m = (
-          cfg.provider?.[cur.providerId]?.models as
-            | Record<
-                string,
-                { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
-              >
-            | undefined
-        )?.[cur.modelId];
-        const reasoning = m?.reasoning;
-        const variants = reasoning?.variants;
-        if (reasoning?.enabled !== false && variants && variants.length > 0) {
-          thoughtOptions = orderThoughtVariants(variants);
-          currentThought = reasoning.defaultVariant ?? variants[0];
-        }
-      } catch {
-        // unreadable config — the static fallback below applies
+      const declared = configReasoningVariants(cur.providerId, cur.modelId);
+      if (declared) {
+        thoughtOptions = orderThoughtVariants(declared.variants);
+        currentThought = declared.defaultVariant ?? (declared.variants[0] ?? currentThought);
+        log(`catalog: pending thought levels from config (model=${cur.modelId})`);
       }
     }
   }
@@ -602,7 +647,6 @@ export async function buildConfigOptions(
         // the pending-session branch advertises), whose variants drive the
         // composer dropdown until a real model switch lands.
         try {
-          const cfg = readConfig() as ConfigShape;
           const srModelKnown = Boolean(cur.providerId && cur.modelId);
           let srcProvider = currentProviderId;
           let srcModel = currentModelId;
@@ -613,28 +657,16 @@ export async function buildConfigOptions(
               srcModel = first.modelId;
             }
           }
-          const pidKey =
-            cfg.provider?.[srcProvider] !== undefined
-              ? srcProvider
-              : srcProvider.replace(/^builtin:/, "");
-          const m = (
-            cfg.provider?.[pidKey]?.models as
-              | Record<
-                  string,
-                  { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
-                >
-              | undefined
-          )?.[srcModel];
-          const variants = m?.reasoning?.variants;
-          if (m?.reasoning?.enabled !== false && variants && variants.length > 0) {
-            const narrowed = orderThoughtVariants(variants.filter((v) => values.has(v)));
+          const declared = configReasoningVariants(srcProvider, srcModel);
+          if (declared) {
+            const narrowed = orderThoughtVariants(declared.variants.filter((v) => values.has(v)));
             if (narrowed.length > 0) {
               thoughtOptions = narrowed;
               if (!narrowed.some((o) => o.value === currentThought)) {
                 // Prefer the operator-declared default (config.json's
                 // reasoning.defaultVariant) over canonical order — the
                 // pending-session branch (above) uses the same preference.
-                const def = m?.reasoning?.defaultVariant;
+                const def = declared.defaultVariant;
                 currentThought =
                   def && narrowed.some((o) => o.value === def)
                     ? def
@@ -648,6 +680,34 @@ export async function buildConfigOptions(
       }
     } catch {
       // keep defaults
+    }
+    // i31: the create/resume snapshot's per-model reasoning (cached in
+    // server.modelAvailability) is the provider-authoritative level list
+    // (GLM-5.3-Flash: low/high/max). `session/read` relays a generic
+    // five-level list for builtin models, and the config-declared narrowing
+    // above only applies where the local config declares variants — when the
+    // snapshot knows the CURRENT model, it wins over both.
+    const availList = server.modelAvailability.get(zcodeSid) ?? [];
+    const availEntry =
+      availList.find(
+        (m) =>
+          m.modelId === currentModelId &&
+          m.providerId !== undefined &&
+          currentProviderId !== "" &&
+          configProviderIdFor(m.providerId) === configProviderIdFor(currentProviderId),
+      ) ?? availList.find((m) => m.modelId === currentModelId);
+    if (availEntry?.levels && availEntry.levels.length > 0) {
+      thoughtOptions = orderThoughtVariants(availEntry.levels);
+      if (!availEntry.levels.includes(currentThought)) {
+        currentThought =
+          availEntry.defaultLevel && availEntry.levels.includes(availEntry.defaultLevel)
+            ? availEntry.defaultLevel
+            : (availEntry.levels[0] ?? currentThought);
+      }
+      log(
+        `catalog: thought levels from backend snapshot (model=${currentModelId}, ` +
+          `levels=${availEntry.levels.join("/")})`,
+      );
     }
     // Same plan-flag fold as buildModes: a plan-active runtime still reports
     // the underlying mode in settings, and the dropdown must show "plan".
@@ -726,6 +786,14 @@ export async function buildConfigOptions(
       type: "string",
       currentValue: server.quotaDock,
     } as unknown as acp.SessionConfigOption);
+  }
+  // i31: a v2-negotiated connection addresses options by configId (the v2
+  // draft renamed the field); emit both spellings there so either client
+  // parser binds. v1 connections keep today's v1-only object untouched.
+  if (server.negotiatedProtocol(receiverRoot) >= 2) {
+    for (const o of options) {
+      (o as { configId?: string }).configId = o.id;
+    }
   }
   return options;
 }
