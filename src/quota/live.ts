@@ -19,7 +19,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { buildConfigOptions } from "../config/options.js";
 import { parseRemoteConfig } from "../remote/config.js";
 import { pushActive } from "../push/config.js";
-import { log, warn } from "../utils.js";
+import { log, shapeForVersion, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { enqueueSessionSend } from "../handlers/io.js";
 import {
@@ -186,13 +186,17 @@ async function emitQuotaOptions(server: ZcodeAcpServer): Promise<void> {
       byZcodeSid.set(zcodeSid, options);
     }
     await enqueueSessionSend(acpSid, async () => {
+      // Per-target shaping (Scope 5 review F5): the shared options array is
+      // version-neutral; a v2 martty connection gets a configId-stamped
+      // clone, v1 targets the untouched array.
       const results = await Promise.allSettled(
-        targets.map((cx) =>
-          cx.notify("session/update", {
-            sessionId: acpSid,
-            update: { sessionUpdate: "config_option_update", configOptions: options },
-          }),
-        ),
+        targets.map((cx) => {
+          const shaped = shapeForVersion(
+            server.negotiatedProtocol(connectionRootOf(cx)),
+            { sessionUpdate: "config_option_update", configOptions: options },
+          );
+          return cx.notify("session/update", { sessionId: acpSid, update: shaped });
+        }),
       );
       for (const r of results) {
         if (r.status === "rejected") {

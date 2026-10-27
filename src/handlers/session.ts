@@ -42,6 +42,7 @@ import {
   loadAllModels,
   modelContextWindow,
   parseModelValue,
+  resolvePinnedModel,
 } from "../config/options.js";
 import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
 import {
@@ -52,7 +53,7 @@ import {
 import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
-import { envPinnedModel, envPinnedThought, initialSessionMode } from "../config/settings.js";
+import { envPinnedThought, initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   effectiveWorkflowGate,
@@ -94,6 +95,7 @@ import {
   readModelCatalogCache,
   refreshModelCatalogInBackground,
   writeModelCatalogCache,
+  type SessionResumeParams,
   type SnapshotResult,
 } from "../config/model-catalog-cache.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
@@ -472,6 +474,13 @@ export async function newSession(
   },
   client?: acp.AgentContext,
 ): Promise<acp.NewSessionResponse> {
+  // i31 Scope 5 review F8: the refresh trigger lives at ENTRY so every
+  // session/new shape covers it — lazy placeholders, martty binds and
+  // boot-resumes alike (a cold bind-first bridge never refreshed before).
+  void refreshModelCatalogInBackground(server, {
+    buildResumeParams: async (catalogSid) =>
+      (await resumeParams(server, catalogSid, process.cwd())) as SessionResumeParams,
+  });
   // Martty bookkeeping (ADR-0021): start the lazy refresher when THIS
   // connection is martty. Identity is per-connection — recorded at the
   // connection's own initialize (server.ts), never the sticky process flag,
@@ -654,7 +663,6 @@ export async function newSession(
   // as lazy pending sessions that never materialize — this is the refresh
   // trigger for the persisted model catalog. Fire-and-forget: the in-flight
   // request is served from existing sources, never blocked.
-  void refreshModelCatalogInBackground(server);
   return response;
 }
 
@@ -937,40 +945,47 @@ export async function ensureRealSession(
       // pinned advertisement + fresh create runs the pin with no extra wire
       // traffic; this apply is the belt-and-suspenders for the case where
       // the backend's own default differs from the pin.
-      const pin = envPinnedModel();
-      if (pin) {
-        const parsed = parseModelValue(pin);
-        const { loadAllModels, setConfigOption } = await import("../config/options.js");
-        const known = loadAllModels().find(
-          (m) => m.providerId === parsed.providerId && m.modelId === parsed.modelId,
+      const pinned = resolvePinnedModel();
+      if (pinned) {
+        const { configReasoningVariants, setConfigOption } = await import("../config/options.js");
+        const selected = formatModelValue(pinned.providerId, pinned.modelId);
+        const snapshotCurrent = formatModelValue(
+          configProviderIdFor(
+            (result.settings?.model?.current?.providerId ?? pinned.providerId) as string,
+          ),
+          (result.settings?.model?.current?.modelId ?? pinned.modelId) as string,
         );
-        if (!known) {
-          warn(`pin: ZCODE_ACP_MODEL ${pin} is not a selectable model — ignored`);
-        } else {
-          const selected = formatModelValue(known.providerId, known.modelId);
-          const snapshotCurrent = formatModelValue(
-            configProviderIdFor(
-              (result.settings?.model?.current?.providerId ?? known.providerId) as string,
-            ),
-            (result.settings?.model?.current?.modelId ?? known.modelId) as string,
-          );
-          if (snapshotCurrent !== selected) {
-            if (await setConfigOption(server, sid, "model", selected, acpSid)) {
-              log(`pin: materialized fresh create onto ${selected}`);
-              const pinThought = envPinnedThought();
-              const catalogEntry = readModelCatalogCache();
-              const levels =
-                catalogEntry &&
-                catalogEntryFor(catalogEntry, known.providerId, known.modelId, configProviderIdFor)
-                  ?.levels;
-              if (pinThought && (!levels || levels.includes(pinThought))) {
-                if (await setConfigOption(server, sid, "thought", pinThought, acpSid)) {
-                  log(`pin: thought set to ${pinThought}`);
-                }
+        if (snapshotCurrent !== selected) {
+          if (await setConfigOption(server, sid, "model", selected, acpSid)) {
+            log(`pin: materialized fresh create onto ${selected}`);
+            // Same advertised-vocabulary rule the readers use (Scope 5
+            // review F2): persisted catalog entry (>=2 levels) first, then
+            // the config declaration — the thought pin applies ONLY inside
+            // that vocabulary, never on a single-level echo or a model with
+            // no declared set.
+            const catalog = readModelCatalogCache();
+            const catalogEntry = catalog
+              ? catalogEntryFor(catalog, pinned.providerId, pinned.modelId, configProviderIdFor)
+              : undefined;
+            const declared =
+              catalogEntry && catalogEntry.levels.length >= 2
+                ? {
+                    variants: catalogEntry.levels,
+                    defaultVariant: catalogEntry.defaultLevel,
+                  }
+                : configReasoningVariants(pinned.providerId, pinned.modelId);
+            const pinThought = envPinnedThought();
+            if (pinThought && declared?.variants.includes(pinThought)) {
+              if (await setConfigOption(server, sid, "thought", pinThought, acpSid)) {
+                log(`pin: thought set to ${pinThought}`);
               }
-            } else {
-              warn(`pin: backend refused ${selected} — running its default`);
+            } else if (pinThought) {
+              warn(
+                `pin: ZCODE_ACP_THOUGHT ${pinThought} is outside the advertised vocabulary for ${selected} — skipped`,
+              );
             }
+          } else {
+            warn(`pin: backend refused ${selected} — running its default`);
           }
         }
       }

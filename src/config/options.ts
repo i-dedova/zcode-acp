@@ -475,6 +475,25 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
+/**
+ * Resolve the ZCODE_ACP_MODEL pin against the SELECTABLE catalog — exact
+ * catalog spelling (providerId\modelId) only; bare or foreign values return
+ * undefined (Scope 5 review F3: advertisement and materialization must
+ * resolve the pin identically, or T3's assert-when-equal logic misfires).
+ */
+export function resolvePinnedModel(): { providerId: string; modelId: string } | undefined {
+  const pin = envPinnedModel();
+  if (!pin) {
+    return undefined;
+  }
+  for (const m of loadAllModels()) {
+    if (formatModelValue(m.providerId, m.modelId) === pin) {
+      return { providerId: m.providerId, modelId: m.modelId };
+    }
+  }
+  return undefined;
+}
+
 /** Build the ACP SessionModeState ({currentModeId, availableModes}).
  *  zcodeSid null = pending session (session/new not yet materialized) — skip
  *  the backend read and return defaults. */
@@ -548,7 +567,7 @@ export function orderThoughtVariants(variants: string[]): Array<{ value: string;
  * mixed `builtin:`-prefixed, `account:`-style and legacy bare ids). Returns
  * null when the config declares nothing — callers keep their wider source.
  */
-function configReasoningVariants(
+export function configReasoningVariants(
   providerId: string,
   modelId: string,
 ): { variants: string[]; defaultVariant?: string } | null {
@@ -632,10 +651,10 @@ export async function buildConfigOptions(
     // ponytail: ceiling: per-AcpSid vocabulary unknown until the client
     // speaks; upgrade when: ACP lets config option values carry per-model
     // metadata or clients echo their selection at session/new.
-    const pinned = envPinnedModel();
+    const pinned = resolvePinnedModel();
     const last = readGlobalModelChoice();
     const pinKnown = pinned
-      ? candidates.find((m) => formatModelValue(m.providerId, m.modelId) === pinned)
+      ? candidates.find((m) => m.providerId === pinned.providerId && m.modelId === pinned.modelId)
       : undefined;
     if (pinKnown) {
       cur = pinKnown;
@@ -670,7 +689,12 @@ export async function buildConfigOptions(
           : configReasoningVariants(cur.providerId, cur.modelId);
       if (declared) {
         thoughtOptions = orderThoughtVariants(declared.variants);
-        currentThought = declared.defaultVariant ?? (declared.variants[0] ?? currentThought);
+        // Membership guard (Scope 5 review F4): a foreign defaultVariant must
+        // not become the advertised current.
+        currentThought =
+          declared.defaultVariant && declared.variants.includes(declared.defaultVariant)
+            ? declared.defaultVariant
+            : (declared.variants[0] ?? currentThought);
         // Env thought pin (butler pattern): honored only when it is in the
         // advertised vocabulary — never inventing a level (review-round-1
         // invariant).

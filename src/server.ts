@@ -688,8 +688,28 @@ export class ZcodeAcpServer {
    * probe's full timeout). The in-flight probe is shared, so concurrent
    * callers pay for ONE shell.
    */
+  /** In-flight cold-spawn promise — concurrent cold callers (a status probe's
+   *  background catalog refresh racing the first materialization) share ONE
+   *  spawn instead of the second overwriting this.backend and orphaning the
+   *  first (review round: Scope 5 F6). */
+  private backendSpawn?: Promise<ZcodeBackend>;
+
   async ensureBackend(): Promise<ZcodeBackend> {
     if (this.backend && !this.backend.isDead) return this.backend;
+    if (!this.backendSpawn) {
+      this.backendSpawn = this.doEnsureBackend();
+    }
+    try {
+      return await this.backendSpawn;
+    } finally {
+      this.backendSpawn = undefined;
+    }
+  }
+
+  private async doEnsureBackend(): Promise<ZcodeBackend> {
+    if (this.backend && !this.backend.isDead) {
+      return this.backend;
+    }
     // Dynamic-workflow gate (desktop-host parity): kick the remote verdict off
     // FIRST so the fetch parallels the login-shell probe and the spawn; the
     // verdict is pinned to THIS backend generation. The assignment happens
