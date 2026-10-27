@@ -472,9 +472,13 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
     states[rule.providerId] = {
       availability: entitled ? "available" : "unavailable",
       entitled,
-      // `current` marks the verdict-bearing plan only — a key-provisioned
-      // plan is switched-to, not the default (review round 1).
-      current: enabled.has(legacyId),
+      // `current: entitled` is LOAD-BEARING for the backend's registry merge:
+      // with current=false on a key-provisioned plan the switch regressed to
+      // "Provider Registry 中不存在 Model" (probe A/B 2026-10-27 — r2-verify
+      // vs p4-verify; same session, only this field differs). The backend
+      // includes a pushed plan provider in the switchable registry only when
+      // the snapshot marks it current.
+      current: entitled,
     };
   }
   return {
