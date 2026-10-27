@@ -256,10 +256,13 @@ export async function refreshModelCatalogInBackground(
         }
       }
       if (!result) {
+        // Same param shape the bridge's own create path sends (workspaceFor):
+        // the backend wants a workspace object, not a bare cwd.
+        const workspace = { workspacePath: process.cwd(), workspaceKey: process.cwd() };
         const resp = await backend.request(
           server.nextId(),
           "session/create",
-          { cwd: process.cwd(), mcpServers: [] },
+          { workspace, mcpServers: [] },
           30000,
         );
         if (resp.error) {
