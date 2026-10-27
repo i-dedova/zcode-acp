@@ -93,11 +93,20 @@ const TABLE_CACHE_MS = 5000;
 let tableCache: { at: number; found: { table: BuiltinTable; file: string } | null } | null = null;
 
 function readBuiltinTable(): { table: BuiltinTable; file: string } | null {
-  if (tableCache && Date.now() - tableCache.at < TABLE_CACHE_MS) {
-    return tableCache.found;
-  }
+  // Path resolution is cheap (env reads + one existsSync); the expensive part
+  // is the table read+parse, so the cache is keyed on the RESOLVED path — a
+  // changed injection env refreshes immediately instead of serving a stale
+  // file for the TTL remainder (which also broke per-fixture tests).
   const file = builtinTablePath();
   if (!file) return null;
+  if (
+    tableCache &&
+    tableCache.found !== null &&
+    tableCache.found.file === file &&
+    Date.now() - tableCache.at < TABLE_CACHE_MS
+  ) {
+    return tableCache.found;
+  }
   try {
     const found = { table: JSON.parse(readFileSync(file, "utf8")) as BuiltinTable, file };
     tableCache = { at: Date.now(), found };
@@ -224,14 +233,21 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  * zai/start/team plan false); source 3 restores the same outcome on fresh
  * desktop-only layouts (verified 2026-10 against a real store).
  */
-let entitledCache: { at: number; set: Set<string> } | null = null;
+let entitledCache: { at: number; dir: string; set: Set<string> } | null = null;
 
 function entitledBuiltinProviders(): Set<string> {
-  if (entitledCache && Date.now() - entitledCache.at < TABLE_CACHE_MS) {
+  const credsDir = path.dirname(ZCODE_CREDS_PATH);
+  // Keyed on the credentials dir: every input below hangs off it, and a
+  // changed dir (per-fixture tests, a relocated ZCODE_HOME) must recompute
+  // instead of serving the previous directory's set for the TTL remainder.
+  if (
+    entitledCache &&
+    entitledCache.dir === credsDir &&
+    Date.now() - entitledCache.at < TABLE_CACHE_MS
+  ) {
     return entitledCache.set;
   }
   const out = new Set<string>();
-  const credsDir = path.dirname(ZCODE_CREDS_PATH);
   let sawVerdict = false;
   // 1) Desktop availability cache (authoritative: the resolved verdict).
   try {
@@ -294,7 +310,7 @@ function entitledBuiltinProviders(): Set<string> {
   } catch {
     // setting.json absent (headless-only) — nothing to infer
   }
-  entitledCache = { at: Date.now(), set: out };
+  entitledCache = { at: Date.now(), dir: credsDir, set: out };
   return out;
 }
 

@@ -276,13 +276,28 @@ export async function refreshModelCatalogInBackground(
 			let result: SnapshotResult | undefined;
 			let usedSid: string | undefined;
 			if (prev?.catalogSessionId) {
-				const params =
-					opts.buildResumeParams !== undefined
-						? await opts.buildResumeParams(prev.catalogSessionId)
-						: {
-								sessionId: prev.catalogSessionId,
-								workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
-							};
+				// A builder throw must not abort the whole refresh — fall back to
+				// the minimal resume shape so the pinned session is still tried
+				// (review round: Scope 5 fix delta).
+				let params: SessionResumeParams;
+				if (opts.buildResumeParams !== undefined) {
+					try {
+						params = await opts.buildResumeParams(prev.catalogSessionId);
+					} catch (e) {
+						log(
+							`catalog-cache: buildResumeParams failed (${e instanceof Error ? e.message : String(e)}) — minimal resume params`,
+						);
+						params = {
+							sessionId: prev.catalogSessionId,
+							workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
+						};
+					}
+				} else {
+					params = {
+						sessionId: prev.catalogSessionId,
+						workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
+					};
+				}
 				const resp = await backend.request(server.nextId(), "session/resume", params, 30000);
 				if (!resp.error) {
 					result = resp.result as SnapshotResult;

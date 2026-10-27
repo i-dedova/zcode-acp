@@ -187,4 +187,90 @@ describe("persisted model catalog cache", () => {
       (server as unknown as { catalogRefreshInFlight: boolean }).catalogRefreshInFlight,
     ).toBe(true);
   });
+
+  /** Backend whose pinned session resumes with a fresh availability snapshot. */
+  function resumableBackend(
+    requested: Array<{ method: string; params: Record<string, unknown> }>,
+  ): ZcodeAcpServer["ensureBackend"] {
+    let nextId = 1;
+    let id = 0;
+    return (async () => ({
+      request(reqId: number, method: string, params?: Record<string, unknown>) {
+        void reqId;
+        id += 1;
+        requested.push({ method, params: params ?? {} });
+        if (method === "session/resume") {
+          return Promise.resolve({
+            result: {
+              settings: {
+                model: {
+                  available: [
+                    {
+                      ref: { providerId: "p", modelId: "m" },
+                      reasoning: { levels: [{ value: "low" }, { value: "high" }] },
+                    },
+                  ],
+                },
+              },
+            },
+          });
+        }
+        return Promise.resolve({ result: {} });
+      },
+      get nextId() {
+        id += 0;
+        return nextId++;
+      },
+    })) as unknown as ZcodeAcpServer["ensureBackend"];
+  }
+
+  it("background refresh builds pinned resume params through the injected builder", async () => {
+    useFakeHome();
+    const server = new ZcodeAcpServer();
+    const requested: Array<{ method: string; params: Record<string, unknown> }> = [];
+    server.ensureBackend = resumableBackend(requested);
+    writeModelCatalogCache(
+      providersFromAvailability([{ providerId: "old", modelId: "m", levels: ["low"] }]),
+      "sess_old_catalog",
+    );
+    const builderParams = {
+      sessionId: "sess_old_catalog",
+      workspace: { workspacePath: "C:/fake/ws", workspaceKey: "C:/fake/ws" },
+      workflowFlag: true,
+      toolDenylist: ["Foo"],
+    };
+    await refreshModelCatalogInBackground(server, {
+      force: true,
+      buildResumeParams: async () => builderParams,
+    });
+    const resume = requested.find((r) => r.method === "session/resume");
+    expect(resume?.params).toEqual(builderParams);
+    // The resumed snapshot satisfied the refresh — no create fallback.
+    expect(requested.map((r) => r.method)).not.toContain("session/create");
+    expect(readModelCatalogCache()?.catalogSessionId).toBe("sess_old_catalog");
+  });
+
+  it("background refresh falls back to minimal resume params when the builder throws", async () => {
+    useFakeHome();
+    const server = new ZcodeAcpServer();
+    const requested: Array<{ method: string; params: Record<string, unknown> }> = [];
+    server.ensureBackend = resumableBackend(requested);
+    writeModelCatalogCache(
+      providersFromAvailability([{ providerId: "old", modelId: "m", levels: ["low"] }]),
+      "sess_old_catalog",
+    );
+    await refreshModelCatalogInBackground(server, {
+      force: true,
+      buildResumeParams: async () => {
+        throw new Error("builder exploded");
+      },
+    });
+    const resume = requested.find((r) => r.method === "session/resume");
+    // The throw degrades to the minimal shape — the pinned resume still runs.
+    expect(resume?.params).toEqual({
+      sessionId: "sess_old_catalog",
+      workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
+    });
+    expect(readModelCatalogCache()?.catalogSessionId).toBe("sess_old_catalog");
+  });
 });

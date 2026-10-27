@@ -11,6 +11,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { dispatchEvent, resetSandboxEpermHintForTest } from "../src/handlers/dispatch.js";
+import { loadAllModels } from "../src/config/options.js";
 import { warn } from "../src/utils.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import type { InternalEvent } from "../src/translators/types.js";
@@ -19,6 +20,84 @@ vi.mock("../src/utils.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/utils.js")>();
   return { ...actual, warn: vi.fn() };
 });
+
+/**
+ * The ConfigChanged tests build real configOptions, whose vocabulary sources
+ * (persisted catalog, cross-session last-choice store) are real files under
+ * ~/.zcode/v2 on a dev machine. Mock both so emissions are deterministic —
+ * same stand-ins thought-narrowing.test.ts uses.
+ */
+const lc = vi.hoisted(() => {
+  let last: { model?: string; thought?: string } | undefined;
+  return {
+    setLast: (v: typeof last) => {
+      last = v;
+    },
+    read: () => last,
+  };
+});
+vi.mock("../src/lazy-sessions.js", () => ({
+  recordModelChoice: () => {},
+  recordGlobalModelChoice: (patch: { model?: string; thought?: string }) => {
+    lc.setLast({ ...lc.read(), ...patch });
+  },
+  readGlobalModelChoice: () => lc.read(),
+}));
+
+const cc = vi.hoisted(() => {
+  let cache: unknown = undefined;
+  return {
+    set: (v: unknown) => {
+      cache = v;
+    },
+    read: () => cache,
+  };
+});
+vi.mock("../src/config/model-catalog-cache.js", () => ({
+  CATALOG_TTL_MS: 600000,
+  readModelCatalogCache: () => cc.read() as never,
+  writeModelCatalogCache: () => {},
+  catalogNeedsRefresh: () => false,
+  catalogEntryFor: (
+    cache: unknown,
+    providerId: string,
+    modelId: string,
+    normalize: (p: string) => string,
+  ) => {
+    const c = cache as
+      | { providers: Record<string, Record<string, { levels: string[]; defaultLevel?: string }>> }
+      | undefined;
+    if (!c?.providers) return undefined;
+    for (const [pid, models] of Object.entries(c.providers)) {
+      const m = models?.[modelId];
+      if (m && normalize(pid) === normalize(providerId)) return m;
+    }
+    return undefined;
+  },
+  availabilityFromResult: () => [],
+  providersFromAvailability: () => ({}),
+  refreshModelCatalogInBackground: () => Promise.resolve(),
+}));
+
+/**
+ * Seed the catalog stand-in with a thought vocabulary for the pending
+ * branch's leading model — buildConfigOptions resolves it from
+ * loadAllModels() on the test machine, so the seed keys off the actual
+ * leading entry instead of a hardcoded provider id.
+ */
+function seedPendingThoughtVocabulary(): void {
+  const lead = loadAllModels()[0];
+  if (!lead) return;
+  cc.set({
+    version: 1,
+    updatedAt: Date.now(),
+    providers: {
+      [lead.providerId]: {
+        [lead.modelId]: { levels: ["low", "high", "max"], defaultLevel: "high" },
+      },
+    },
+  });
+}
 
 /** Mock AgentContext that records every notify call. */
 function mockContext(): { cx: acp.AgentContext; sent: acp.SessionUpdate[] } {
@@ -319,6 +398,7 @@ describe("dispatchEvent", () => {
   });
 
   it("ConfigChanged (mode) emits config_option_update + current_mode_update", async () => {
+    seedPendingThoughtVocabulary();
     const { cx, sent } = mockContext();
     const server = makeServer(false);
     await dispatchEvent(
@@ -338,10 +418,10 @@ describe("dispatchEvent", () => {
       configOptions: [
         { id: "model", currentValue: "anthropic\\GLM-5.2" },
         { id: "mode", currentValue: "plan" },
-        // The default thought value is config-derived (per-model
-        // reasoning.variants of the enabled provider), so it legitimately
-        // varies with the machine the test runs on.
-        { id: "thought", currentValue: expect.any(String) },
+        // The pending branch's thought vocabulary is the seeded catalog
+        // entry (levels low/high/max, default high); the event carries no
+        // thought patch, so the default stands.
+        { id: "thought", currentValue: "high" },
       ],
     });
     expect(sent[1]).toEqual({
@@ -353,6 +433,7 @@ describe("dispatchEvent", () => {
   });
 
   it("ConfigChanged (thought only) emits config_option_update, no mode update", async () => {
+    seedPendingThoughtVocabulary();
     const { cx, sent } = mockContext();
     await dispatchEvent(
       makeServer(false),
@@ -383,7 +464,10 @@ describe("dispatchEvent", () => {
           settings: {
             model: { current: { providerId: "deepseek", modelId: "DeepSeek-V3.5" } },
             mode: { current: "build" },
-            thoughtLevel: { current: "high" },
+            thoughtLevel: {
+              current: "high",
+              available: [{ value: "high", label: "high" }, { value: "max", label: "max" }],
+            },
           },
         },
       }),

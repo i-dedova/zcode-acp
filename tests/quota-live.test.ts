@@ -71,6 +71,9 @@ function fakeServer(opts: { martty?: boolean } = {}) {
     pendingSessions: new Map([["acp-pending", {}]]),
     resolveSid: (sid: string) =>
       sid === "acp-1" ? "z-1" : sid === "acp-pending" ? undefined : undefined,
+    // Per-target shaping (Scope 5 review F5) consults the negotiated version
+    // per target connection — the fake speaks v1 (identity shaping).
+    negotiatedProtocol: () => 1,
     clients: {
       snapshot: () => [marttyCx, editorCx],
     },

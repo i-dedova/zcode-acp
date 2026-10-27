@@ -57,7 +57,10 @@ function boot() {
             settings: {
               model: { current: { providerId: "zai", modelId: "glm-4.6" } },
               mode: { current: "plan" },
-              thoughtLevel: { current: "high" },
+              thoughtLevel: {
+                current: "high",
+                available: [{ value: "high", label: "high" }, { value: "max", label: "max" }],
+              },
             },
           },
         };

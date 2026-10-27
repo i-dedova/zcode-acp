@@ -21,6 +21,23 @@ vi.mock("../src/tasks-index.js", () => ({
   updateSessionTitle: async () => true,
 }));
 
+/**
+ * The boot-resume RPC-count tests assert exact backend call sequences around
+ * session/new. The Scope-5 entry-triggered catalog refresh would inject
+ * provider/refreshRegistry + snapshot RPCs into that window — disable it
+ * (catalogNeedsRefresh false) and no-op the harvest writers.
+ */
+vi.mock("../src/config/model-catalog-cache.js", () => ({
+  CATALOG_TTL_MS: 600000,
+  readModelCatalogCache: () => undefined,
+  writeModelCatalogCache: () => {},
+  catalogNeedsRefresh: () => false,
+  catalogEntryFor: () => undefined,
+  availabilityFromResult: () => [],
+  providersFromAvailability: () => ({}),
+  refreshModelCatalogInBackground: () => Promise.resolve(),
+}));
+
 /** Fake backend recording RPCs; session/resume + messages answer minimally. */
 function fakeBackend(history: ZcodeMessage[] = []): {
   backend: ZcodeBackend;

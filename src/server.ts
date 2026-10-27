@@ -695,14 +695,22 @@ export class ZcodeAcpServer {
   private backendSpawn?: Promise<ZcodeBackend>;
 
   async ensureBackend(): Promise<ZcodeBackend> {
-    if (this.backend && !this.backend.isDead) return this.backend;
+    if (this.backend && !this.backend.isDead) {
+      return this.backend;
+    }
     if (!this.backendSpawn) {
       this.backendSpawn = this.doEnsureBackend();
     }
+    const p = this.backendSpawn;
     try {
-      return await this.backendSpawn;
+      return await p;
     } finally {
-      this.backendSpawn = undefined;
+      // Clear only when THIS caller's spawn is still the registered one — a
+      // slow loser of a superseded generation must not clobber a newer
+      // in-flight spawn's bookkeeping (review round: Scope 5 fix delta).
+      if (this.backendSpawn === p) {
+        this.backendSpawn = undefined;
+      }
     }
   }
 

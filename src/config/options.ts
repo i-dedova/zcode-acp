@@ -480,13 +480,18 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
  * catalog spelling (providerId\modelId) only; bare or foreign values return
  * undefined (Scope 5 review F3: advertisement and materialization must
  * resolve the pin identically, or T3's assert-when-equal logic misfires).
+ * `candidates` lets an already-loaded model list be reused (the pending
+ * branch loads the same list for its leading entry — one full config read
+ * per build, not two).
  */
-export function resolvePinnedModel(): { providerId: string; modelId: string } | undefined {
+export function resolvePinnedModel(
+  candidates: ModelRef[] = loadAllModels(),
+): { providerId: string; modelId: string } | undefined {
   const pin = envPinnedModel();
   if (!pin) {
     return undefined;
   }
-  for (const m of loadAllModels()) {
+  for (const m of candidates) {
     if (formatModelValue(m.providerId, m.modelId) === pin) {
       return { providerId: m.providerId, modelId: m.modelId };
     }
@@ -651,7 +656,7 @@ export async function buildConfigOptions(
     // ponytail: ceiling: per-AcpSid vocabulary unknown until the client
     // speaks; upgrade when: ACP lets config option values carry per-model
     // metadata or clients echo their selection at session/new.
-    const pinned = resolvePinnedModel();
+    const pinned = resolvePinnedModel(candidates);
     const last = readGlobalModelChoice();
     const pinKnown = pinned
       ? candidates.find((m) => m.providerId === pinned.providerId && m.modelId === pinned.modelId)
