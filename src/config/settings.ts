@@ -138,3 +138,21 @@ export function languageOverride(env: NodeJS.ProcessEnv = process.env): "zh" | "
   };
   return pick(loadUserConfig(env).lang) ?? pick(env.ZCODE_ACP_LANG);
 }
+
+/**
+ * Butler-pattern per-instance overrides (i31 Scope 5): T3 Code's provider
+ * Environment settings pass these to every bridge spawn, so the operator can
+ * pin WHICH model the composer advertises (and its thought level) from the
+ * client's own UI — the same channel ZCODE_ACP_AUTO_COMPACT_THRESHOLD rides.
+ * The model value is the catalog spelling (providerId\modelId); the bridge
+ * validates it against the selectable catalog and ignores unknown values.
+ */
+export function envPinnedModel(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const v = env.ZCODE_ACP_MODEL?.trim();
+  return v ? v : undefined;
+}
+
+export function envPinnedThought(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const v = env.ZCODE_ACP_THOUGHT?.trim();
+  return v ? v : undefined;
+}

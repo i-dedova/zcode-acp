@@ -548,6 +548,9 @@ export class ZcodeAcpServer {
     string,
     Array<{ providerId?: string; modelId?: string; defaultLevel?: string; levels?: string[] }>
   >();
+  /** Background persisted-catalog refresh in flight (one per process, i31
+   *  Scope 5) — see config/model-catalog-cache.ts. */
+  catalogRefreshInFlight = false;
   /**
    * Per-connection negotiated ACP protocol version (i31 patch 2), keyed by
    * clientConnectionRoot like marttyConnectionRoots. initialize() records the

@@ -75,6 +75,42 @@ vi.mock("../src/lazy-sessions.js", () => ({
   readGlobalModelChoice: () => lc.read(),
 }));
 
+/** Deterministic stand-in for the persisted model catalog. */
+const cc = vi.hoisted(() => {
+  let cache: unknown = undefined;
+  return {
+    set: (v: unknown) => {
+      cache = v;
+    },
+    read: () => cache,
+  };
+});
+vi.mock("../src/config/model-catalog-cache.js", () => ({
+  CATALOG_TTL_MS: 600000,
+  readModelCatalogCache: () => cc.read() as never,
+  writeModelCatalogCache: () => {},
+  catalogNeedsRefresh: () => true,
+  catalogEntryFor: (
+    cache: unknown,
+    providerId: string,
+    modelId: string,
+    normalize: (p: string) => string,
+  ) => {
+    const c = cache as
+      | { providers: Record<string, Record<string, { levels: string[]; defaultLevel?: string }>> }
+      | undefined;
+    if (!c?.providers) return undefined;
+    for (const [pid, models] of Object.entries(c.providers)) {
+      const m = models?.[modelId];
+      if (m && normalize(pid) === normalize(providerId)) return m;
+    }
+    return undefined;
+  },
+  availabilityFromResult: () => [],
+  providersFromAvailability: () => ({}),
+  refreshModelCatalogInBackground: () => Promise.resolve(),
+}));
+
 /** Fake backend answering session/read with the GENERIC builtin advertisement. */
 class FakeBackend {
   isDead = false;
@@ -252,5 +288,114 @@ describe("pending composer catalog (i31 patch 2)", () => {
     const options = await buildConfigOptions(new ZcodeAcpServer(), null);
     const model = options.find((o) => o.id === "model");
     expect(model?.currentValue).toBe("builtin:zai-coding-plan\\GLM-5.3");
+  });
+
+  it("omits the thought option when nothing declares a vocabulary (review round 1)", async () => {
+    // No static fallback: inventing low/high/max for a model whose real set
+    // differs (enabled/off) advertises levels the runtime rejects.
+    lc.setLast(undefined);
+    cc.set(undefined);
+    await setConfig({
+      "GLM-5.3": {},
+      [h.MODEL]: {},
+    });
+    const options = await buildConfigOptions(new ZcodeAcpServer(), null);
+    expect(options.find((o) => o.id === "thought")).toBeUndefined();
+    expect(options.find((o) => o.id === "model")).toBeDefined();
+    expect(options.find((o) => o.id === "mode")).toBeDefined();
+  });
+
+  it("keeps the session/read list when the persisted catalog carries a single level", async () => {
+    // Create-time snapshots echo the current default (levels=[max]); the
+    // full list lands after requestRuntimePreferences. A single catalog
+    // level must not shrink the picker.
+    const server = makeServer(h.MODEL, undefined as never, "high");
+    cc.set({
+      version: 1,
+      updatedAt: Date.now(),
+      providers: {
+        "builtin:zai-coding-plan": { "GLM-5.3-Flash": { levels: ["max"], defaultLevel: "max" } },
+      },
+    });
+    try {
+      await setConfig({});
+      const thought = await thoughtOption(server);
+      expect(thought?.options.map((o) => o.value)).toEqual([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+      expect(thought?.currentValue).toBe("high");
+    } finally {
+      cc.set(undefined);
+    }
+  });
+
+  it("does not take another plan's catalog levels for the same modelId", async () => {
+    // Provider-aware match only: GLM-5.3-Flash exists under several plans.
+    const server = makeServer(h.MODEL, undefined as never, "high");
+    cc.set({
+      version: 1,
+      updatedAt: Date.now(),
+      providers: {
+        "builtin:zai-start-plan": {
+          "GLM-5.3-Flash": { levels: ["low", "high", "max"], defaultLevel: "low" },
+        },
+      },
+    });
+    try {
+      await setConfig({});
+      const thought = await thoughtOption(server);
+      expect(thought?.options.map((o) => o.value)).toEqual([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+    } finally {
+      cc.set(undefined);
+    }
+  });
+
+  it("takes the provider-matched catalog over the config declaration", async () => {
+    const server = makeServer(h.MODEL, undefined as never, "high");
+    cc.set({
+      version: 1,
+      updatedAt: Date.now(),
+      providers: {
+        "builtin:zai-coding-plan": {
+          "GLM-5.3-Flash": { levels: ["low", "high", "max"], defaultLevel: "max" },
+        },
+      },
+    });
+    try {
+      await setConfig({
+        [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high"], defaultVariant: "low" } },
+      });
+      const thought = await thoughtOption(server);
+      expect(thought?.options.map((o) => o.value)).toEqual(["low", "high", "max"]);
+      expect(thought?.currentValue).toBe("high");
+    } finally {
+      cc.set(undefined);
+    }
+  });
+
+  it("honors the env thought pin only inside the advertised vocabulary", async () => {
+    lc.setLast(undefined);
+    cc.set(undefined);
+    process.env.ZCODE_ACP_THOUGHT = "max";
+    try {
+      await setConfig({
+        [h.MODEL]: { reasoning: { enabled: true, variants: ["low", "high"], defaultVariant: "low" } },
+      });
+      const options = await buildConfigOptions(new ZcodeAcpServer(), null);
+      const thought = options.find((o) => o.id === "thought");
+      expect(thought?.currentValue).toBe("low");
+    } finally {
+      delete process.env.ZCODE_ACP_THOUGHT;
+    }
   });
 });

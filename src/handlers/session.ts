@@ -52,7 +52,7 @@ import {
 import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
-import { initialSessionMode } from "../config/settings.js";
+import { envPinnedModel, envPinnedThought, initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   effectiveWorkflowGate,
@@ -87,6 +87,15 @@ import {
   zcodeHomeDir,
   type ConfigOptionWireValue,
 } from "../utils.js";
+import {
+  availabilityFromResult,
+  catalogEntryFor,
+  providersFromAvailability,
+  readModelCatalogCache,
+  refreshModelCatalogInBackground,
+  writeModelCatalogCache,
+  type SnapshotResult,
+} from "../config/model-catalog-cache.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import {
@@ -636,11 +645,17 @@ export async function newSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
   scheduleQuotaDockBackstop(server);
-  return shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(client)), {
+  const response = shapeForVersion(server.negotiatedProtocol(clientConnectionRoot(client)), {
     sessionId: acpSid,
     modes,
     configOptions: await buildConfigOptions(server, null, clientConnectionRoot(client)),
   });
+  // i31 Scope 5: T3's provider-status probes and composer creations arrive
+  // as lazy pending sessions that never materialize — this is the refresh
+  // trigger for the persisted model catalog. Fire-and-forget: the in-flight
+  // request is served from existing sources, never blocked.
+  void refreshModelCatalogInBackground(server);
+  return response;
 }
 
 /**
@@ -910,6 +925,54 @@ export async function ensureRealSession(
       const selected = formatModelValue(pinnedProvider, pinnedModel);
       if (!(await applyModelSwitch(server, sid, selected))) {
         throw new Error(`zcode refused configured model ${selected}`);
+      }
+    } else {
+      // i31 Scope 5 B1: ZCODE_ACP_MODEL (+ZCODE_ACP_THOUGHT) is the
+      // butler-pattern per-instance DEFAULT pin (T3 provider Environment).
+      // Fresh creates only — resumed sessions keep their stored selection
+      // (per-thread state wins). SOFT: an invalid pin warns and falls
+      // through to the backend default; a default must never brick the
+      // composer the way the fail-loud pair above does. T3 asserts its own
+      // selection at open only when it differs from the advertisement, so a
+      // pinned advertisement + fresh create runs the pin with no extra wire
+      // traffic; this apply is the belt-and-suspenders for the case where
+      // the backend's own default differs from the pin.
+      const pin = envPinnedModel();
+      if (pin) {
+        const parsed = parseModelValue(pin);
+        const { loadAllModels, setConfigOption } = await import("../config/options.js");
+        const known = loadAllModels().find(
+          (m) => m.providerId === parsed.providerId && m.modelId === parsed.modelId,
+        );
+        if (!known) {
+          warn(`pin: ZCODE_ACP_MODEL ${pin} is not a selectable model — ignored`);
+        } else {
+          const selected = formatModelValue(known.providerId, known.modelId);
+          const snapshotCurrent = formatModelValue(
+            configProviderIdFor(
+              (result.settings?.model?.current?.providerId ?? known.providerId) as string,
+            ),
+            (result.settings?.model?.current?.modelId ?? known.modelId) as string,
+          );
+          if (snapshotCurrent !== selected) {
+            if (await setConfigOption(server, sid, "model", selected, acpSid)) {
+              log(`pin: materialized fresh create onto ${selected}`);
+              const pinThought = envPinnedThought();
+              const catalogEntry = readModelCatalogCache();
+              const levels =
+                catalogEntry &&
+                catalogEntryFor(catalogEntry, known.providerId, known.modelId, configProviderIdFor)
+                  ?.levels;
+              if (pinThought && (!levels || levels.includes(pinThought))) {
+                if (await setConfigOption(server, sid, "thought", pinThought, acpSid)) {
+                  log(`pin: thought set to ${pinThought}`);
+                }
+              }
+            } else {
+              warn(`pin: backend refused ${selected} — running its default`);
+            }
+          }
+        }
       }
     }
     // session/create loads the session into this backend process.
@@ -2613,13 +2676,7 @@ export async function setConfigOptionHandler(
   // Materialize a lazy session/new placeholder on first use.
   const zcodeSid = await ensureRealSession(server, params.sessionId);
   const { setConfigOption, emitConfigOptionUpdate } = await import("../config/options.js");
-  const result = await setConfigOption(
-    server,
-    zcodeSid,
-    params.configId,
-    value,
-    params.sessionId,
-  );
+  const result = await setConfigOption(server, zcodeSid, params.configId, value, params.sessionId);
   if (!result) {
     throw new Error(`unsupported config option or switch failed: ${params.configId}`);
   }
@@ -3379,27 +3436,17 @@ export function cacheModelAvailability(
   zcodeSid: string,
   result: unknown,
 ): void {
-  const settings = (result as { settings?: Record<string, unknown> } | null | undefined)?.settings;
-  const model = settings?.model as
-    | {
-        available?: Array<{
-          ref?: { providerId?: string; modelId?: string };
-          reasoning?: { defaultLevel?: string; levels?: Array<{ value?: string }> };
-        }>;
-      }
-    | undefined;
-  const avail = model?.available ?? [];
-  if (avail.length === 0) return;
-  server.modelAvailability.set(
-    zcodeSid,
-    avail.map((a) => ({
-      providerId: a.ref?.providerId,
-      modelId: a.ref?.modelId,
-      defaultLevel: a.reasoning?.defaultLevel ?? a.reasoning?.levels?.[0]?.value,
-      levels: (a.reasoning?.levels ?? [])
-        .map((l) => l.value)
-        .filter((v): v is string => typeof v === "string"),
-    })),
+  const mapped = availabilityFromResult(result as SnapshotResult | null);
+  if (mapped.length === 0) {
+    return;
+  }
+  server.modelAvailability.set(zcodeSid, mapped);
+  // i31 Scope 5: the snapshot is also the PERSISTED catalog's writer — the
+  // bridge reads vocabularies from the json file, so every harvest keeps it
+  // current (pinned catalog session id preserved).
+  writeModelCatalogCache(
+    providersFromAvailability(mapped),
+    readModelCatalogCache()?.catalogSessionId,
   );
 }
 

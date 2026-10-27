@@ -56,6 +56,17 @@ vi.mock("../src/lazy-sessions.js", () => ({
   readGlobalModelChoice: () => lc.read(),
 }));
 import { ZcodeAcpServer } from "../src/server.js";
+
+vi.mock("../src/config/model-catalog-cache.js", () => ({
+  CATALOG_TTL_MS: 600000,
+  readModelCatalogCache: () => undefined,
+  writeModelCatalogCache: () => {},
+  catalogNeedsRefresh: () => true,
+  catalogEntryFor: () => undefined,
+  availabilityFromResult: () => [],
+  providersFromAvailability: () => ({}),
+  refreshModelCatalogInBackground: () => Promise.resolve(),
+}));
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */

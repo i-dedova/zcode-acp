@@ -39,7 +39,11 @@ import {
   configProviderIdFor,
   isEntitledBuiltinProvider,
 } from "./account-provider.js";
-import { initialSessionMode } from "./settings.js";
+import {
+  catalogEntryFor,
+  readModelCatalogCache,
+} from "./model-catalog-cache.js";
+import { envPinnedModel, envPinnedThought, initialSessionMode } from "./settings.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -587,6 +591,9 @@ export async function buildConfigOptions(
   zcodeSid: string | null,
   receiverRoot?: unknown,
 ): Promise<acp.SessionConfigOption[]> {
+  // i31 Scope 5 (operator ruling): the PERSISTED catalog is the primary
+  // vocabulary source in BOTH paths — read once per build here.
+  const modelCatalog = readModelCatalogCache();
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
   let currentMode = zcodeSid === null ? initialSessionMode() : "build";
@@ -608,23 +615,31 @@ export async function buildConfigOptions(
     // "low" was missing).
     const candidates = loadAllModels();
     let cur = candidates[0];
-    // i31: start on the user's LAST-USED model (the desktop composer
-    // convention), not whichever provider sorts first in config.json — the
-    // leading entry's vocabulary is what a client shows until a model switch
-    // lands, and T3 overlays its own remembered selection on top of it
-    // (observed 2026-10-27: composer displayed GLM-5.3-Flash over a
-    // Qwen-vocabulary effort list). Foreign/deleted choices fall back to the
-    // leading entry. DESIGN CEILING: T3's session/new carries no model
-    // (payload is cwd/mcpServers/directories only — AcpSessionRuntime.ts) and
-    // its composer renders its OWN remembered selection without consulting
-    // the agent, so a pre-open composer can show a vocabulary for a model the
-    // catalog is not advertising; the first set_config_option/prompt corrects
-    // it (T3 applies the rebuilt options — its mode·thought chips track
-    // switches). ponytail: ceiling: per-AcpSid vocabulary unknown until the
-    // client speaks; upgrade when: ACP lets config option values carry
-    // per-model metadata or clients echo their selection at session/new.
+    // i31: the composer's advertised model resolves in this order:
+    // 1. ZCODE_ACP_MODEL env pin (butler-pattern per-instance override —
+    //    T3's provider Environment settings pass it at spawn; the operator
+    //    pins the advertised default from the client's own UI),
+    // 2. the cross-session LAST-USED model (the desktop composer
+    //    convention),
+    // 3. the leading selectable entry.
+    // Foreign/deleted values fall through to the next tier. DESIGN CEILING:
+    // T3's session/new carries no model (payload is cwd/mcpServers/
+    // directories only — AcpSessionRuntime.ts) and its composer renders its
+    // OWN remembered selection without consulting the agent, so a pre-open
+    // composer picking a DIFFERENT model still shows the advertised
+    // vocabulary until the first set_config_option/prompt (T3 applies the
+    // rebuilt options — its mode·thought chips track switches).
+    // ponytail: ceiling: per-AcpSid vocabulary unknown until the client
+    // speaks; upgrade when: ACP lets config option values carry per-model
+    // metadata or clients echo their selection at session/new.
+    const pinned = envPinnedModel();
     const last = readGlobalModelChoice();
-    if (last && typeof last.model === "string" && last.model.length > 0) {
+    const pinKnown = pinned
+      ? candidates.find((m) => formatModelValue(m.providerId, m.modelId) === pinned)
+      : undefined;
+    if (pinKnown) {
+      cur = pinKnown;
+    } else if (last && typeof last.model === "string" && last.model.length > 0) {
       const parsed = parseModelValue(last.model);
       const known = candidates.find(
         (m) => m.providerId === parsed.providerId && m.modelId === parsed.modelId,
@@ -642,11 +657,33 @@ export async function buildConfigOptions(
       // wrong model whenever the requested id happened to match it.
       currentProviderId = cur.providerId;
       currentModelId = cur.modelId;
-      const declared = configReasoningVariants(cur.providerId, cur.modelId);
+      // Persisted catalog first; config.json declarations are the fallback
+      // for models the catalog does not know. A single-level catalog entry
+      // is the backend echoing its default, not a vocabulary — it defers to
+      // config the same way the live guard does.
+      const entry = modelCatalog
+        ? catalogEntryFor(modelCatalog, cur.providerId, cur.modelId, configProviderIdFor)
+        : undefined;
+      const declared =
+        entry && entry.levels.length >= 2
+          ? { variants: entry.levels, defaultVariant: entry.defaultLevel }
+          : configReasoningVariants(cur.providerId, cur.modelId);
       if (declared) {
         thoughtOptions = orderThoughtVariants(declared.variants);
         currentThought = declared.defaultVariant ?? (declared.variants[0] ?? currentThought);
-        log(`catalog: pending thought levels from config (model=${cur.modelId})`);
+        // Env thought pin (butler pattern): honored only when it is in the
+        // advertised vocabulary — never inventing a level (review-round-1
+        // invariant).
+        const pinnedThought = envPinnedThought();
+        if (
+          pinnedThought &&
+          thoughtOptions.some((o) => o.value === pinnedThought)
+        ) {
+          currentThought = pinnedThought;
+        }
+        log(
+          `catalog: pending thought levels from ${entry && entry.levels.length >= 2 ? "persisted catalog" : "config"} (model=${cur.modelId})`,
+        );
       }
     }
   }
@@ -741,38 +778,32 @@ export async function buildConfigOptions(
     // five-level list for builtin models, and the config-declared narrowing
     // above only applies where the local config declares variants — when the
     // snapshot knows the CURRENT model, it wins over both.
-    const availList = server.modelAvailability.get(zcodeSid) ?? [];
-    // Provider-aware match ONLY: the same modelId exists under several plans
-    // (GLM-5.3-Flash under coding-plan, start-plan, apikey), so a modelId-only
-    // fallback could take another plan's vocabulary and default.
-    const availEntry =
-      currentProviderId === ""
+    // i31 Scope 5 (operator ruling): the PERSISTED catalog is the primary
+    // source in the live path too. It is provider-aware (catalogEntryFor —
+    // the same modelId exists under several plans; a modelId-only match
+    // would take another plan's vocabulary) and never staler than the old
+    // in-memory map, because every harvest (cacheModelAvailability) writes
+    // the file synchronously. A SHORT entry (<2 levels) is the backend
+    // echoing its default (observed 2026-10-27: create-time snapshots carry
+    // levels=[max]) — it defers to the config declaration and never shrinks
+    // the picker; with no declaration, whatever earlier sources produced
+    // stands (review round 1: no invented fallback).
+    const catalogEntry =
+      currentProviderId === "" || !modelCatalog
         ? undefined
-        : availList.find(
-            (m) =>
-              m.modelId === currentModelId &&
-              m.providerId !== undefined &&
-              configProviderIdFor(m.providerId) === configProviderIdFor(currentProviderId),
-          );
-    // A SINGLE-entry snapshot list is the backend echoing the current default,
-    // not a vocabulary (observed 2026-10-27: the create-time snapshot for
-    // GLM-5.3-Flash carried levels=[max]; the settled list after
-    // requestRuntimePreferences carried low/high/max). A short snapshot
-    // defers to the model's own config.json declaration and never shrinks
-    // the picker on its own; with no declaration, whatever earlier sources
-    // produced stands (review round 1: no invented fallback).
-    const snapshotLevels = availEntry?.levels ?? [];
-    if (snapshotLevels.length >= 2) {
-      thoughtOptions = orderThoughtVariants(snapshotLevels);
-      if (!snapshotLevels.includes(currentThought)) {
+        : catalogEntryFor(modelCatalog, currentProviderId, currentModelId, configProviderIdFor);
+    const catalogLevels = catalogEntry?.levels ?? [];
+    if (catalogLevels.length >= 2) {
+      thoughtOptions = orderThoughtVariants(catalogLevels);
+      if (!catalogLevels.includes(currentThought)) {
         currentThought =
-          availEntry?.defaultLevel && snapshotLevels.includes(availEntry.defaultLevel)
-            ? availEntry.defaultLevel
-            : (snapshotLevels[0] ?? currentThought);
+          catalogEntry?.defaultLevel && catalogLevels.includes(catalogEntry.defaultLevel)
+            ? catalogEntry.defaultLevel
+            : (catalogLevels[0] ?? currentThought);
       }
       log(
-        `catalog: thought levels from backend snapshot (model=${currentModelId}, ` +
-          `levels=${snapshotLevels.join("/")})`,
+        `catalog: thought levels from persisted catalog (model=${currentModelId}, ` +
+          `levels=${catalogLevels.join("/")})`,
       );
     } else if (tlAvailLength === 0) {
       // tlAvail non-empty cases are handled by the narrowing inside the
@@ -789,9 +820,9 @@ export async function buildConfigOptions(
               ? declared.defaultVariant
               : (declared.variants[0] ?? currentThought);
         }
-        if (snapshotLevels.length === 1) {
+        if (catalogLevels.length === 1) {
           log(
-            `catalog: thought levels from config (single-level snapshot for ${currentModelId} ignored)`,
+            `catalog: thought levels from config (single-level catalog entry for ${currentModelId} ignored)`,
           );
         }
       }

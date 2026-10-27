@@ -13,6 +13,17 @@ import { buildConfigOptions } from "../src/config/options.js";
 import { newSession, setConfigOptionHandler } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
+vi.mock("../src/config/model-catalog-cache.js", () => ({
+  CATALOG_TTL_MS: 600000,
+  readModelCatalogCache: () => undefined,
+  writeModelCatalogCache: () => {},
+  catalogNeedsRefresh: () => true,
+  catalogEntryFor: () => undefined,
+  availabilityFromResult: () => [],
+  providersFromAvailability: () => ({}),
+  refreshModelCatalogInBackground: () => Promise.resolve(),
+}));
+
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
   updateSessionTitle: async () => true,
