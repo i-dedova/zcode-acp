@@ -23,6 +23,14 @@ In active development. Core bridging, slash commands and ZCode extensions,
 auto-compaction, remote access for mobile/web clients, and the quota APIs are
 in place; see the project board for what's next.
 
+> **i31 fork:** this tree carries the maintained fork
+> ([i-dedova/zcode-acp](https://github.com/i-dedova/zcode-acp), branch
+> `i31/reasoning-levels`): ACP v1/v2 dual protocol with per-connection
+> shaping, a persisted provider-authoritative model catalog (reasoning
+> levels are never hardcoded), composer default pins
+> (`ZCODE_ACP_MODEL`/`ZCODE_ACP_THOUGHT`), account-plan provider fixes, and
+> Windows launch fixes. See [docs/I31-FORK.md](docs/I31-FORK.md).
+
 ## Prompt attachments
 
 ACP embedded resources preserve the supplied content: text is included in the
@@ -302,6 +310,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 - [Replay Guide](docs/REPLAY-GUIDE.md) — building a client UI on tail replay
 - [Development](docs/DEVELOPMENT.md) — local development, debugging, adding extension methods
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common-issue troubleshooting
+- [The i31 fork](docs/I31-FORK.md) — dual ACP protocol, persisted model catalog, composer pins, T3 Code setup, fork troubleshooting
 
 ## Contributing
 
